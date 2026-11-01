@@ -1,3 +1,7 @@
+> **【中文使用者必读】** 本仓库派生自 denoland/celld。我们在单机部署中踩明了若干官方文档未集中说明的硬限制（一个舰队只跑一个应用根、cron 只认根、组件更新需重启才生效、队列 sendBatch ≤100 条），并形成了「互绑闭包 + 中央调度器 + 单容器多 worker」的稳定架构。**改动 celld 部署结构前请先读：[【必读】celld使用指南](./【必读】celld使用指南.md)**
+
+---
+
 # celld
 
 Self-hosted, distributed **Durable Objects**.
