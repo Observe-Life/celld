@@ -1,5 +1,6 @@
 // 图片/语音转写——金贝贝直连单通道。任何失败直接抛出（该文档任务中止，不产出降级内容）。
 import type { Env } from "../env";
+import { sha256HexStr } from "./store";
 
 const VISION_PROMPT =
   "下面按顺序给出这篇内容里的图片。每张图前面都已经用 [[编号]] 标好了它的编号，" +
@@ -38,25 +39,37 @@ async function callLlm(env: Env, body: unknown, timeoutMs = 180000): Promise<str
   return pickText(text);
 }
 
+// 转写缓存（B 方案）：按附件内容哈希存 KV，重建 md 时直接复用，不再重复烧钱
 // 每批 10 张（实测 40 张可行，取平衡点）；任何批次失败即抛出中止
 export async function transcribeImages(env: Env, images: Array<{ mime: string; b64: string }>): Promise<string[]> {
   if ((env.SKIP_GEMINI || "").trim() === "1") return images.map(() => "（转写已跳过）");
   const out: string[] = new Array(images.length).fill("");
+  const pending: number[] = [];
+  const keys: string[] = [];
+  for (let i = 0; i < images.length; i += 1) {
+    const key = "tx:" + (await sha256HexStr(images[i].b64));
+    keys.push(key);
+    const hit = await env.STATE.get(key);
+    if (hit != null) out[i] = hit;
+    else pending.push(i);
+  }
+  if (pending.length) console.log(`[kb-sync] vision cache: ${images.length - pending.length}/${images.length} hit`);
   const BATCH = 10;
-  for (let start = 0; start < images.length; start += BATCH) {
-    const batch = images.slice(start, start + BATCH);
+  for (let start = 0; start < pending.length; start += BATCH) {
+    const group = pending.slice(start, start + BATCH);
     const parts: Array<Record<string, unknown>> = [{ type: "text", text: VISION_PROMPT }];
-    batch.forEach((image, index) => {
-      parts.push({ type: "text", text: `[[${index + 1}]]` });
-      parts.push({ type: "image_url", image_url: { url: `data:${image.mime};base64,${image.b64}` } });
+    group.forEach((idx, n) => {
+      parts.push({ type: "text", text: `[[${n + 1}]]` });
+      parts.push({ type: "image_url", image_url: { url: `data:${images[idx].mime};base64,${images[idx].b64}` } });
     });
     parts.push({ type: "text", text: "结束" });
     const answer = await callLlm(env, { model: MODEL, temperature: 0, messages: [{ role: "user", content: parts }] });
-    for (let index = 0; index < batch.length; index += 1) {
-      const hit = answer.split(`[[${index + 1}]]`);
-      const value = hit.length > 1 ? hit[1].split("[[")[0].trim() : "";
-      if (!value) throw new Error(`VISION_EMPTY: 批次${start / BATCH + 1}第${index + 1}张无转写结果`);
-      out[start + index] = value;
+    for (let n = 0; n < group.length; n += 1) {
+      const seg = answer.split(`[[${n + 1}]]`);
+      const value = seg.length > 1 ? seg[1].split("[[")[0].trim() : "";
+      if (!value) throw new Error(`VISION_EMPTY: 批次${start / BATCH + 1}第${n + 1}张无转写结果`);
+      out[group[n]] = value;
+      await env.STATE.put(keys[group[n]], value); // 回写缓存
     }
   }
   return out;
@@ -64,6 +77,9 @@ export async function transcribeImages(env: Env, images: Array<{ mime: string; b
 
 export async function transcribeAudio(env: Env, mime: string, b64: string): Promise<string> {
   if ((env.SKIP_GEMINI || "").trim() === "1") return "（转写已跳过）";
+  const key = "tx:" + (await sha256HexStr(b64));
+  const hit = await env.STATE.get(key);
+  if (hit != null) return hit;
   const format = (mime || "audio/webm").includes("ogg") ? "ogg" : (mime || "").includes("mpeg") ? "mp3" : "webm";
   const body = {
     model: MODEL, temperature: 0,
@@ -72,5 +88,7 @@ export async function transcribeAudio(env: Env, mime: string, b64: string): Prom
       { type: "input_audio", input_audio: { data: b64, format } },
     ] }],
   };
-  return await callLlm(env, body); // 失败即抛出
+  const text = await callLlm(env, body); // 失败即抛出
+  await env.STATE.put(key, text);
+  return text;
 }

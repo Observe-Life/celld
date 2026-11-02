@@ -115,3 +115,7 @@ export async function delMeta(kv: KVNamespace, uuid: string): Promise<void> {
 export async function delRaw(r2: R2Bucket, uuid: string): Promise<void> {
   await r2.delete(`raw/${uuid}.json`);
 }
+
+export async function sha256HexStr(text: string): Promise<string> {
+  return sha256Hex(new TextEncoder().encode(text));
+}

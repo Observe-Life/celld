@@ -1,0 +1,71 @@
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: minio
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - /vol1/docker/minio/data:/data
+    command: server /data --address :9000 --console-address :9001
+    networks: [backend]
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    restart: "no"
+    depends_on: [minio]
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/celld-fleet"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    networks: [backend]
+
+  celld:
+    build:
+      context: .
+      dockerfile: Dockerfile.toolbox
+    image: celld-full:latest
+    container_name: celld
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    mem_limit: 1g
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      CELLD_BUCKET: "s3://celld-fleet"
+      S3_ENDPOINT: "http://minio:9000"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      CELLD_WATCH: "/var/lib/celld/state"
+      # JS 处理预算：多图转写 + 等解析可能超过默认 300s，放宽到 15 分钟（队列租约随之拉长）
+      CELLD_HANDLER_BUDGET_S: "900"
+      # 防复发：启用 epoch GC（保留 7 天），失败启动/旧 epoch 不再无限堆积
+      CELLD_LTX_RETENTION_SECS: "604800"
+    volumes:
+      - /vol1/docker/celld/state:/var/lib/celld
+    command:
+      - --listen
+      - 0.0.0.0:8080
+      - --internal-listen
+      - 0.0.0.0:8081
+      - --advertise
+      - celld:8081
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [backend]
+
+networks:
+  backend:
+    external: true
