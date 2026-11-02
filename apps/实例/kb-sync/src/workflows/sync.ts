@@ -1,6 +1,6 @@
 // 派活器（KV/R2 版）：比对会话元数据与台账，产出待处理队列消息；下架由 /files DELETE 驱动
 import type { Env } from "../env";
-import { listMetas, getLedger, type SessionMeta } from "../lib/store";
+import { listMetas, getLedger, isApproved, type SessionMeta } from "../lib/store";
 import { findKnowledgeBase } from "../lib/weknora";
 
 export interface WorkItem { uuid: string; }
@@ -18,6 +18,7 @@ export async function collectWork(env: Env, limit?: number): Promise<CollectResu
 
   const metas = await listMetas(env.STATE);
   for (const meta of metas) {
+    if (!(await isApproved(env.STATE, meta.uuid))) continue; // 未审批（含已下架）永不自愈复活
     const ledger = await getLedger(env.STATE, meta.uuid);
     if (!ledger || ledger.updated_at !== meta.updated_at) {
       report.items.push({ uuid: meta.uuid });

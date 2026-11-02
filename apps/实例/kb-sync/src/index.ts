@@ -1,7 +1,7 @@
 import type { Env } from "./env";
 import { collectWork, listPendingApproval } from "./workflows/sync";
 import { processSession, recordFailure, QUEUE_MAX_ATTEMPTS } from "./workflows/session-sync";
-import { putMeta, getLedger, delLedger, loadMd, listMd, saveRaw, putLedger } from "./lib/store";
+import { putMeta, getLedger, delLedger, loadMd, listMd, saveRaw, putLedger, acquireLock, releaseLock, setApproved, clearApproved, isApproved, delMeta, delRaw } from "./lib/store";
 import type { RawSession } from "./lib/md";
 
 function authorized(request: Request, env: Env): boolean {
@@ -27,8 +27,8 @@ export default {
         platform: raw.platform || "", updated_at: raw.updated_at, pushed_at: new Date().toISOString(),
       });
       const ledger = await getLedger(env.STATE, raw.uuid);
-      // 审批闸门：新会话(无台账)只存不处理；已有台账的会话变更自动重推
-      if (!ledger) return Response.json({ ok: true, pending_approval: true });
+      // 审批闸门：未审批过的新会话只存不处理；已审批/已有台账的变更自动重推
+      if (!ledger && !(await isApproved(env.STATE, raw.uuid))) return Response.json({ ok: true, pending_approval: true });
       const dup = ledger.updated_at === raw.updated_at && ledger.parse_status === "completed";
       if (!dup) await env.QUEUE.send({ uuid: raw.uuid });
       return Response.json({ ok: true, queued: !dup, skipped: !!dup });
@@ -65,14 +65,33 @@ export default {
       const { delMd } = await import("./lib/store");
       await delMd(env.FILES, name);
       await delLedger(env.STATE, hit);
+      await clearApproved(env.STATE, hit); // 下架即撤销审批：定时对账不得复活
       return Response.json({ ok: true, retracted: hit });
     }
 
     if (url.pathname === "/approve" && request.method === "POST") {
       const body = (await request.json()) as { uuid?: string };
       if (!body.uuid) return Response.json({ ok: false, error: "uuid required" }, { status: 400 });
+      await setApproved(env.STATE, body.uuid);
       await env.QUEUE.send({ uuid: body.uuid });
       return Response.json({ ok: true, approved: body.uuid, queued: true });
+    }
+    if (url.pathname === "/set-approved" && request.method === "POST") {
+      const body = (await request.json()) as { uuids?: string[] };
+      for (const u of body.uuids || []) await setApproved(env.STATE, u);
+      return Response.json({ ok: true, marked: (body.uuids || []).length });
+    }
+    if (url.pathname === "/purge" && request.method === "POST") {
+      const body = (await request.json()) as { uuid?: string };
+      if (!body.uuid) return Response.json({ ok: false }, { status: 400 });
+      const l = await getLedger(env.STATE, body.uuid);
+      if (l?.knowledge_id) { const { deleteKnowledge } = await import("./lib/weknora"); try { await deleteKnowledge(env, l.knowledge_id); } catch {} }
+      if (l?.md) { const { delMd } = await import("./lib/store"); await delMd(env.FILES, l.md); }
+      await delLedger(env.STATE, body.uuid);
+      await clearApproved(env.STATE, body.uuid);
+      await delMeta(env.STATE, body.uuid);
+      await delRaw(env.FILES, body.uuid);
+      return Response.json({ ok: true, purged: body.uuid });
     }
     if (url.pathname === "/pending" && request.method === "GET") {
       return Response.json({ ok: true, pending: await listPendingApproval(env) });
@@ -97,6 +116,11 @@ export default {
   async queue(batch: MessageBatch<{ uuid: string }>, env: Env): Promise<void> {
     for (const message of batch.messages) {
       const uuid = message.body.uuid;
+      if (!(await acquireLock(env.STATE, uuid))) {
+        message.ack();
+        console.log("[kb-sync] lock skip (同会话已在处理)", uuid);
+        continue;
+      }
       try {
         await processSession(env, uuid);
         message.ack();
@@ -111,6 +135,8 @@ export default {
         } else {
           message.retry({ delaySeconds: 60 });
         }
+      } finally {
+        await releaseLock(env.STATE, uuid);
       }
     }
   },

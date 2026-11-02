@@ -80,3 +80,38 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as ArrayBuffer);
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
+
+// 按会话单飞锁：防同一 uuid 被并发消费互相删档（2026-11-02 竞态修复）
+export async function acquireLock(kv: KVNamespace, uuid: string, ttlSec = 900): Promise<boolean> {
+  const key = "lock:" + uuid;
+  const now = Date.now();
+  try {
+    const cur = await kv.get(key);
+    if (cur) {
+      const c = JSON.parse(cur) as { t: number };
+      if (now - c.t < ttlSec * 1000) return false;
+    }
+  } catch {}
+  await kv.put(key, JSON.stringify({ t: now }), { expirationTtl: ttlSec });
+  return true;
+}
+export async function releaseLock(kv: KVNamespace, uuid: string): Promise<void> {
+  try { await kv.delete("lock:" + uuid); } catch {}
+}
+
+export async function setApproved(kv: KVNamespace, uuid: string): Promise<void> {
+  await kv.put("approved:" + uuid, "1");
+}
+export async function isApproved(kv: KVNamespace, uuid: string): Promise<boolean> {
+  return (await kv.get("approved:" + uuid)) === "1";
+}
+export async function clearApproved(kv: KVNamespace, uuid: string): Promise<void> {
+  await kv.delete("approved:" + uuid);
+}
+
+export async function delMeta(kv: KVNamespace, uuid: string): Promise<void> {
+  await kv.delete(META(uuid));
+}
+export async function delRaw(r2: R2Bucket, uuid: string): Promise<void> {
+  await r2.delete(`raw/${uuid}.json`);
+}
