@@ -1,0 +1,30 @@
+{
+  "name": "multimedia-pipeline",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "services": [
+    { "binding": "KBSYNC", "service": "kb-sync" },
+    { "binding": "SCHEDULER", "service": "scheduler" }
+  ],
+  "workflows": [
+    {
+      "binding": "FLOW",
+      "name": "multimedia-transcribe",
+      "class_name": "TranscribeFlow"
+    },
+    {
+      "binding": "PIPELINE",
+      "name": "multimedia-pipeline",
+      "class_name": "PipelineFlow"
+    }
+  ],
+  "vars": {
+    "EGRESS_URL": "http://oc-egress:8888",
+    "TIKHUB_TOKEN": "@TIKHUB_TOKEN@",
+    "RELAY_TOKEN": "@RELAY_TOKEN@",
+    "GEMINI_KEY": "@GEMINI_KEY@",
+    "SUPABASE_KEY": "@SUPABASE_KEY@",
+    "SERVERCHAN_URL": "@SERVERCHAN_URL@",
+    "SHAPI_KEY": "@SHAPI_KEY@"
+  }
+}

@@ -1,0 +1,4 @@
+node_modules/
+secrets.json
+wrangler.jsonc
+.celld/

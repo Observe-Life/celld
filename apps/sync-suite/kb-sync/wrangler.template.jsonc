@@ -1,0 +1,35 @@
+{
+  "name": "kb-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "kv_namespaces": [{ "binding": "STATE", "id": "sync-state" }],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "sync-files" }],
+  "queues": {
+    "producers": [{ "binding": "QUEUE", "queue": "kb-conv-sync" }],
+    "consumers": [
+      {
+        "queue": "kb-conv-sync",
+        "max_batch_size": 1,
+        "max_retries": 2,
+        "max_concurrency": 2,
+        "retry_delay": 60,
+        "dead_letter_queue": "kb-conv-sync-dlq"
+      },
+      { "queue": "kb-conv-sync-dlq" }
+    ]
+  },
+  "services": [
+    { "binding": "MM", "service": "multimedia-pipeline" },
+    { "binding": "SCHEDULER", "service": "scheduler" }
+  ],
+  "vars": {
+    "WEKNORA_URL": "http://weknora-lite:8080",
+    "WEKNORA_KEY": "@WEKNORA_KEY@",
+    "GEMINI_KEY": "@GEMINI_KEY@",
+    "SHAPI_KEY": "@SHAPI_KEY@",
+    "JBB_KEY": "@JBB_KEY@",
+    "SKIP_GEMINI": "0",
+    "INGEST_TOKEN": "@INGEST_TOKEN@",
+    "SYNC_ALLOWLIST": "@SYNC_ALLOWLIST@"
+  }
+}
