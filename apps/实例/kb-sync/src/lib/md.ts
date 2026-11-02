@@ -1,6 +1,6 @@
 // 会话原始数据 → md。数据来自插件推送的 raw 载荷（消息+附件base64），不再依赖外部通道。
 import type { Env } from "../env";
-import { transcribeAudio, transcribeImages } from "./transcribe";
+import { transcribeImages } from "./transcribe";
 
 export interface RawPart {
   type: string;
@@ -88,7 +88,6 @@ async function partsToLines(
   const textFragments: string[] = [];
   const filenames: string[] = [];
   const images: Array<{ mime: string; b64: string }> = [];
-  const audios: Array<{ mime: string; b64: string }> = [];
 
   for (const part of parts) {
     if ((part.type === "plain" || part.type === "text") && part.text != null) {
@@ -101,8 +100,8 @@ async function partsToLines(
     } else if (part.type === "file") {
       filenames.push(part.filename || "未知文件名");
     } else if (part.type === "record") {
-      const a = resolveAsset(part, attachments);
-      if (a) audios.push(a);
+      // 2026-11-03：语音不再转写，与文件一样只列名（附件本身已随会话保存）
+      filenames.push(part.filename || "语音文件");
     }
   }
 
@@ -117,10 +116,6 @@ async function partsToLines(
     lines.push(`【（${speaker}发送了 ${images.length} 张图片）${items.join(" ")}】`);
   }
 
-  for (const audio of audios) {
-    const text = await transcribeAudio(env, audio.mime, audio.b64);
-    lines.push(`【${speaker}发送了 1 条语音，转写为文字：${text}】`);
-  }
   return lines;
 }
 

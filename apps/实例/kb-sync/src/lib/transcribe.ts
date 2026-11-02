@@ -75,20 +75,3 @@ export async function transcribeImages(env: Env, images: Array<{ mime: string; b
   return out;
 }
 
-export async function transcribeAudio(env: Env, mime: string, b64: string): Promise<string> {
-  if ((env.SKIP_GEMINI || "").trim() === "1") return "（转写已跳过）";
-  const key = "tx:" + (await sha256HexStr(b64));
-  const hit = await env.STATE.get(key);
-  if (hit != null) return hit;
-  const format = (mime || "audio/webm").includes("ogg") ? "ogg" : (mime || "").includes("mpeg") ? "mp3" : "webm";
-  const body = {
-    model: MODEL, temperature: 0,
-    messages: [{ role: "user", content: [
-      { type: "text", text: "把这条语音转写成文字，只输出文字内容，不要说明。" },
-      { type: "input_audio", input_audio: { data: b64, format } },
-    ] }],
-  };
-  const text = await callLlm(env, body); // 失败即抛出
-  await env.STATE.put(key, text);
-  return text;
-}
