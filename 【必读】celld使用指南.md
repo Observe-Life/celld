@@ -40,10 +40,10 @@ celld（唯一容器 = 唯一舰队）
 ## 三、操作手册
 
 ### 加一个新 worker（第 4、第 100 个都一样）
-1. 新建 `apps/sync-suite/<name>/`，`wrangler.jsonc` 里对**每个现存 worker**加 `services` 绑定；
+1. 新建 `apps/实例/<name>/`，`wrangler.jsonc` 里对**每个现存 worker**加 `services` 绑定；
 2. 反向：给每个现存 worker 的模板加上对 `<name>` 的绑定；
 3. 需要定时的话：在 scheduler 的 `triggers.crons` 加表达式 + `SCHEDULES` 加路由；
-4. 跑 `apps/sync-suite/deploy.sh`（自动含重启）。
+4. 跑 `apps/实例/deploy.sh`（自动含重启）。
 
 ### 常用端点（经 scheduler 前门）
 | 端点 | 用途 |
