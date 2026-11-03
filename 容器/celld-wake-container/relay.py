@@ -14,6 +14,7 @@
 import docker
 import json
 import os
+import socket as netsocket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STANDBY = os.environ.get("CELLD_WAKE_STANDBY", "celld-typescript-check")
@@ -30,6 +31,53 @@ def standby_state():
         return "missing"
 
 
+def _recv_exact(sock, n):
+    """从 socket 精确读满 n 字节（EOF 提前则返回已读到的部分）。"""
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def container_exec(c, cmd, payload):
+    """在容器里跑一条命令，把 payload 写进它的 stdin，返回 (exit_code, 输出字节)。
+
+    docker SDK 的 exec_run 不提供写 stdin 的入口（stdin_data 会被静默丢弃、input 参数不存在），
+    所以这里走底层 API：exec_create(stdin=True) → exec_start(socket=True) → sendall →
+    **必须 shutdown 写端**，否则工作进程永远等不到 stdin EOF 而挂住。
+    """
+    # stderr 必须关：stdout+stderr 同时开会触发 docker 的多路复用分帧（每条输出前加 8 字节帧头），
+    # 裸读 socket 就会把帧头混进 JSON。工作进程本身把错误编码进 stdout 的 JSON 里，不需要 stderr。
+    exec_id = cli.api.exec_create(c.id, cmd, stdin=True, stdout=True, stderr=False, tty=False)
+    sock = cli.api.exec_start(exec_id, socket=True, tty=False)
+    try:
+        raw_sock = getattr(sock, "_sock", sock)
+        raw_sock.sendall(payload)
+        # 必须关闭写端：工作进程要读到 stdin EOF 才会结束，否则永远挂着。
+        raw_sock.shutdown(netsocket.SHUT_WR)
+        # 手动解 docker 的多路复用帧：每帧 = 1 字节类型 + 3 字节保留 + 4 字节大端长度 + 负载。
+        # 非 tty 的 exec 流一定带帧，裸 recv 会把帧头混进 JSON（实测首帧 01 00 00 00 00 00 00 53）。
+        chunks = []
+        while True:
+            hdr = _recv_exact(raw_sock, 8)
+            if len(hdr) < 8:
+                break
+            kind = hdr[0]
+            size = int.from_bytes(hdr[4:8], "big")
+            data = _recv_exact(raw_sock, size) if size else b""
+            if kind == 1:  # stdout；kind==2 是 stderr，工作进程不用它
+                chunks.append(data)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    return cli.api.exec_inspect(exec_id)["ExitCode"], b"".join(chunks)
+
+
 def run_check(raw):
     """在待命容器内跑一次检查；返回 (http_status, 响应字节)。"""
     c = cli.containers.get(STANDBY)
@@ -38,9 +86,8 @@ def run_check(raw):
         c.reload()
         if c.status != "running":
             return 503, json.dumps({"ok": False, "error": "standby container not running"}).encode()
-    res = c.exec_run(WORK_CMD, stdin_data=raw, demux=False)
-    out = res.output if isinstance(res.output, (bytes, bytearray)) else str(res.output).encode()
-    return (200 if res.exit_code == 0 else 500), out
+    code, out = container_exec(c, WORK_CMD, raw)
+    return (200 if code == 0 else 500), out
 
 
 class Handler(BaseHTTPRequestHandler):
