@@ -38,10 +38,10 @@ http.createServer((req, res) => {
         skipLibCheck: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true,
         noImplicitReturns: true, types: [], lib: ["es2022", "webworker"] };
       const host = {
-        getSourceFile: (n, lv) => { const t = contents.get(n) ?? contents.get(n.replace(/^\//, "")) ?? LIBS.get(n.replace(/^\//, ""));
+        getSourceFile: (n, lv) => { const base = n.replace(/^\//, ""); const t = contents.get(n) ?? contents.get(base) ?? LIBS.get(base) ?? LIBS.get("lib." + base);
           return t === undefined ? undefined : ts.createSourceFile(n, t, lv, true); },
-        fileExists: (n) => contents.has(n) || LIBS.has(n) || contents.has(n.replace(/^\//, "")),
-        readFile: (n) => contents.get(n) ?? contents.get(n.replace(/^\//, "")) ?? LIBS.get(n.replace(/^\//, "")),
+        fileExists: (n) => { const base = n.replace(/^\//, ""); return contents.has(n) || contents.has(base) || LIBS.has(base) || LIBS.has("lib." + base); },
+        readFile: (n) => { const base = n.replace(/^\//, ""); return contents.get(n) ?? contents.get(base) ?? LIBS.get(base) ?? LIBS.get("lib." + base); },
         directoryExists: () => true, getDirectories: () => [], getCurrentDirectory: () => "/",
         getCanonicalFileName: (n) => n, getNewLine: () => "\n", useCaseSensitiveFileNames: () => true,
         getDefaultLibFileName: () => "lib.es2022.d.ts", getDefaultLibLocation: () => "", writeFile: () => {},
