@@ -1,83 +1,135 @@
-"""celld 唤醒器与按需编排器：
-- /health：健康检查
-- /check {instance_dir}：按需拉起一次性 tsc 容器跑类型检查（L0 由部署闸门承担）
-- 闲置自动停止受管容器（celld-typescript-check 等）
+"""celld-wake-container：待命容器的唤醒器与按需转发器（常驻 ~25MB 内存）。
+
+职责边界（只做这三件事，不碰业务逻辑，也不碰源码文件）：
+- GET  /health  本机健康 + 受管容器当前状态
+- POST /check   唤醒 celld-typescript-check，把请求体原样转发给它，回传诊断结果
+- 空闲守护      超过 IDLE_SECS 没有 /check 请求，就把受管容器停掉（平时不占内存）
+
+调用方负责准备 files（{相对路径: 源码}）——astrbot 容器已挂载 /vol1/docker/celld，
+在调用侧读文件即可，本容器因此不需要挂载任何实例目录。
 """
-import docker, socket, threading, time, json, os
+import docker
+import json
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+IDLE_SECS = 600          # 空闲多少秒后停掉待命容器
+START_TIMEOUT = 40       # 唤醒后等待就绪的最长秒数
+FORWARD_TIMEOUT = 180    # 一次类型检查的最长秒数
+
+# 受管待命容器：容器名 -> 机内服务地址与端口（backend 网桥内按容器名解析）
+MANAGED = {
+    "celld-typescript-check": "http://celld-typescript-check:8080",
+}
 
 cli = docker.from_env()
-MANAGED = ["celld-typescript-check"]
-IDLE = 600
-last = [time.time()]
-TSC_IMAGE = "ghcr.io/observe-life/node-tsc:latest"
+last_used = [time.time()]
 
-def wake(name):
+
+def container_state(name):
+    """返回受管容器状态：running / exited / missing。"""
     try:
-        c = cli.containers.get(name)
-        if c.status != "running":
-            c.start()
-        return True
+        return cli.containers.get(name).status
     except Exception:
-        return False
+        return "missing"
 
-def run_typecheck(instance_dir):
-    src = instance_dir.rstrip("/") + "/kb-sync"
-    tsconfig = {
-        "compilerOptions": {
-            "strict": True, "noEmit": True, "target": "ES2022",
-            "module": "ESNext", "moduleResolution": "Bundler",
-            "lib": ["ES2022", "WebWorker"], "skipLibCheck": True,
-            "noUncheckedIndexedAccess": True, "exactOptionalPropertyTypes": True,
-            "noImplicitReturns": True,
-            "types": [], "typeRoots": ["/usr/local/lib/node_modules/@cloudflare/workers-types"],
-        },
-        "include": ["/src/**/*.ts"],
-    }
-    cmd = "node -e " + json.dumps(
-        "const fs=require(fs);fs.writeFileSync(/tmp/t.json,process.env.TSCONFIG)") + \
-        " && npx tsc -p /tmp/t.json --pretty false"
-    out = cli.containers.run(
-        TSC_IMAGE, ["sh", "-c", cmd],
-        environment={"TSCONFIG": json.dumps(tsconfig)},
-        volumes={src: {"bind": "/src", "mode": "ro"}},
-        remove=True, stderr=True,
-    )
-    return out.decode("utf-8", "ignore") if isinstance(out, bytes) else str(out)
+
+def wait_ready(base):
+    """轮询 /health，直到待命容器真的能接活。"""
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=3) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def ensure_running(name):
+    """按需唤醒：停着就 start，醒着就复用。"""
+    state = container_state(name)
+    if state == "missing":
+        return False, "managed container not found: " + name
+    if state != "running":
+        cli.containers.get(name).start()
+        state = "started"
+    if not wait_ready(MANAGED[name]):
+        return False, "managed container not ready after start"
+    return True, state
+
 
 def idle_watch():
+    """空闲守护：把待命容器重新停回去。"""
     while True:
         time.sleep(30)
-        if time.time() - last[0] > IDLE:
-            for name in MANAGED:
-                try:
-                    c = cli.containers.get(name)
-                    if c.status == "running":
-                        c.stop(timeout=5)
-                except Exception:
-                    pass
+        if time.time() - last_used[0] <= IDLE_SECS:
+            continue
+        for name in MANAGED:
+            try:
+                c = cli.containers.get(name)
+                if c.status == "running":
+                    c.stop(timeout=5)
+                    print("[wake] idle stop " + name, flush=True)
+            except Exception:
+                pass
 
-def pump(a, b):
-    try:
-        while True:
-            d = a.recv(65536)
-            if not d: break
-            b.sendall(d)
-    except OSError: pass
-    try: b.shutdown(socket.SHUT_WR)
-    except OSError: pass
 
-lf = socket.socket(); lf.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-lf.bind(("0.0.0.0", 8081)); lf.listen(128)
-print("[wake] listening :8081", flush=True)
+class Handler(BaseHTTPRequestHandler):
+    def _json(self, code, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/health":
+            return self._json(200, {
+                "ok": True,
+                "service": "celld-wake-container",
+                "managed": {name: container_state(name) for name in MANAGED},
+            })
+        self._json(404, {"ok": False, "error": "unknown route"})
+
+    def do_POST(self):
+        if self.path != "/check":
+            return self._json(404, {"ok": False, "error": "unknown route"})
+        last_used[0] = time.time()
+        name = next(iter(MANAGED))
+        try:
+            n = int(self.headers.get("content-length", 0))
+            raw = self.rfile.read(n) if n else b"{}"
+            ok, detail = ensure_running(name)
+            if not ok:
+                return self._json(503, {"ok": False, "error": detail})
+            req = urllib.request.Request(
+                MANAGED[name] + "/check", data=raw,
+                headers={"content-type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=FORWARD_TIMEOUT) as resp:
+                    payload = resp.read()
+                    self.send_response(resp.status)
+                    self.send_header("content-type", "application/json; charset=utf-8")
+                    self.send_header("content-length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+            except urllib.error.HTTPError as e:
+                return self._json(e.code, {"ok": False, "error": e.read().decode("utf-8", "ignore")[:300]})
+        except Exception as e:
+            return self._json(500, {"ok": False, "error": str(e)[:300]})
+
+    def log_message(self, *args):
+        pass
+
+
 threading.Thread(target=idle_watch, daemon=True).start()
-while True:
-    a, _ = lf.accept()
-    last[0] = time.time()
-    try:
-        if not wake(MANAGED[0]): a.close(); continue
-        last[0] = time.time()
-        b = socket.create_connection(("celld-typescript-check", 8080), 5)
-        threading.Thread(target=pump, args=(a, b), daemon=True).start()
-        threading.Thread(target=pump, args=(b, a), daemon=True).start()
-    except OSError as e:
-        print("[wake] conn error:", e, flush=True)
+print("[wake] listening :8081, managed=" + ",".join(MANAGED), flush=True)
+ThreadingHTTPServer(("0.0.0.0", 8081), Handler).serve_forever()

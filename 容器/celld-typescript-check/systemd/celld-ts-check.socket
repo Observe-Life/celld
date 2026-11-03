@@ -1,7 +1,0 @@
-[Unit]
-Description=celld ts-check socket (按需唤醒 172.23.0.1:8081)
-[Socket]
-ListenStream=172.23.0.1:8081
-ListenStream=127.0.0.1:8081
-[Install]
-WantedBy=sockets.target

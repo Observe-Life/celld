@@ -65,6 +65,24 @@ services:
       timeout: 5s
       retries: 3
     networks: [backend]
+  # ===== 类型检查：常驻待命容器 + 唤醒器（celld-wake-container 负责 start/stop/转发）=====
+  # 待命容器用 profile 隔离：docker compose up 不会自动拉起它，平时零内存占用
+  celld-typescript-check:
+    image: ghcr.io/observe-life/celld-typescript-check:latest
+    container_name: celld-typescript-check
+    profiles: ["standby"]
+    restart: "no"
+    mem_limit: 512m
+    networks: [backend]
+
+  celld-wake-container:
+    image: ghcr.io/observe-life/celld-wake-container:latest
+    container_name: celld-wake-container
+    restart: unless-stopped
+    mem_limit: 64m
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [backend]
 
 networks:
   backend:

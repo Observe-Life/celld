@@ -1,61 +1,137 @@
-// celld 类型检查服务：POST /check {files:{路径:源码}, ambient?:string} → 诊断清单
-// 内存纪律：每请求全新 Program（用完即被 GC，无 LanguageService 缓存泄漏）；
-//          skipLibCheck；lib 链按需从磁盘读取（容器内有完整 typescript 包）。
+// celld-typescript-check：常驻待命的 TS 类型检查服务（平时由 celld-wake-container 停着，唤醒时干活）
+//
+// 接口：POST /check {files: {"相对路径": "源码", ...}, compilerOptions?: {...}} 
+//       → {ok, errors, warnings, diagnostics:[{file,line,col,code,severity,message}]}
+//       GET  /health → {ok:true, service, typescript}
+//
+// 实现口径（重要）：把收到的源码落到 /app/run/<请求id>/ 真实目录，再用 TypeScript 标准
+// CompilerHost（ts.sys）从磁盘解析。lib/*.d.ts、node_modules、types 全由编译器自己按
+// 官方机制查找，与 `tsc -p` 完全同一条路径，因此本文件不手写任何 lib 文件名映射、
+// 不做任何前缀兜底。之前 205 条 "Cannot find global type" 就是手写映射拼错 lib 目录导致的。
 const http = require("http");
-const ts = require("typescript");
 const fs = require("fs");
 const path = require("path");
+const ts = require("typescript");
 
-const LIBDIR = path.join(path.dirname(require.resolve("typescript")), "lib");
-const LIBS = new Map();
-function lib(name) {
-  if (LIBS.has(name)) return LIBS.get(name);
-  for (const cand of [name, name + ".d.ts", "lib." + name, "lib." + name + ".d.ts"]) {
-    const p = path.join(LIBDIR, cand);
-    if (fs.existsSync(p)) { const t = fs.readFileSync(p, "utf8"); LIBS.set(cand, t); return t; }
-  }
-  return undefined;
+const RUN_ROOT = "/app/run";
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
+
+// 与实例 tsconfig.json 保持同一口径（wrangler 生成的也是这套）
+const DEFAULT_COMPILER_OPTIONS = {
+  strict: true,
+  noEmit: true,
+  target: "ES2022",
+  module: "ESNext",
+  moduleResolution: "Bundler",
+  lib: ["ES2022", "WebWorker"],
+  types: ["@cloudflare/workers-types"],
+  skipLibCheck: true,
+  noUncheckedIndexedAccess: true,
+  exactOptionalPropertyTypes: true,
+  noImplicitReturns: true,
+};
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { "content-type": "application/json; charset=utf-8" });
+  res.end(body);
 }
-function chain(start) { const t = lib(start); if (t) for (const m of t.matchAll(/\/\/\/ *<reference lib="([^"]+)"/g)) lib(m[1]); }
-try { chain("lib.es2022.d.ts"); chain("lib.webworker.d.ts"); } catch (e) { console.error("[ts-check] lib 初始化失败:", e.message); }
-let WT = ""; try { WT = fs.readFileSync(require.resolve("@cloudflare/workers-types/index.d.ts"), "utf8"); LIBS.set("workers-types.d.ts", WT); } catch (e) { console.error("[ts-check] workers-types 读取失败:", e.message); }
-LIBS.set("workers-types.d.ts", WT);
 
-http.createServer((req, res) => {
-  if (req.method === "GET" && req.url === "/health") { res.writeHead(200); return res.end('{"ok":true,"service":"ts-check"}'); }
-  if (req.method !== "POST" || req.url !== "/check") { res.writeHead(404); return res.end(); }
-  let body = ""; req.on("data", c => body += c);
-  req.on("end", () => {
-    try {
-      const { files, ambient } = JSON.parse(body);
-      if (!files || !Object.keys(files).length) { res.writeHead(400); return res.end('{"ok":false,"error":"no files"}'); }
-      const contents = new Map(Object.entries(files));
-      for (const [k, v] of LIBS) if (!contents.has(k)) contents.set(k, v);
-      if (ambient) contents.set("(ambient).d.ts", ambient);
-      const rootNames = [...Object.keys(files), "workers-types.d.ts", ...(ambient ? ["(ambient).d.ts"] : [])];
-      const options = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2022,
-        module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler,
-        skipLibCheck: true, noUncheckedIndexedAccess: true, exactOptionalPropertyTypes: true,
-        noImplicitReturns: true, types: [], lib: ["es2022", "webworker"] };
-      const host = {
-        getSourceFile: (n, lv) => { const base = n.replace(/^\//, ""); const t = contents.get(n) ?? contents.get(base) ?? LIBS.get(base) ?? LIBS.get("lib." + base);
-          return t === undefined ? undefined : ts.createSourceFile(n, t, lv, true); },
-        fileExists: (n) => { const base = n.replace(/^\//, ""); return contents.has(n) || contents.has(base) || LIBS.has(base) || LIBS.has("lib." + base); },
-        readFile: (n) => { const base = n.replace(/^\//, ""); return contents.get(n) ?? contents.get(base) ?? LIBS.get(base) ?? LIBS.get("lib." + base); },
-        directoryExists: () => true, getDirectories: () => [], getCurrentDirectory: () => "/",
-        getCanonicalFileName: (n) => n, getNewLine: () => "\n", useCaseSensitiveFileNames: () => true,
-        getDefaultLibFileName: () => "lib.es2022.d.ts", getDefaultLibLocation: () => "", writeFile: () => {},
-      };
-      const program = ts.createProgram({ rootNames, options, host });
-      const diags = ts.getPreEmitDiagnostics(program).map(dg => {
-        const f = dg.file ? dg.file.fileName : "(compiler)";
-        const pos = dg.file ? dg.file.getLineAndCharacterOfPosition(dg.start ?? 0) : { line: 0, character: 0 };
-        return { file: f, line: pos.line + 1, col: pos.character + 1, code: dg.code,
-                 severity: dg.category === ts.DiagnosticCategory.Error ? "error" : "warning",
-                 message: ts.flattenDiagnosticMessageText(dg.messageText, " ") };
+// 每个请求一个独立临时目录，用完即删：无跨请求缓存，内存占用只有单次 Program
+function runCheck(files, compilerOptions) {
+  const dir = fs.mkdtempSync(path.join(RUN_ROOT, "req-"));
+  try {
+    const names = Object.keys(files);
+    if (!names.length) throw new Error("no files");
+    for (const name of names) {
+      if (path.isAbsolute(name) || name.split("/").includes("..")) {
+        throw new Error("unsafe path: " + name);
+      }
+      const target = path.join(dir, name);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, String(files[name]), "utf8");
+    }
+
+    const config = {
+      compilerOptions: Object.assign({}, DEFAULT_COMPILER_OPTIONS, compilerOptions || {}),
+      include: ["**/*.ts", "**/*.d.ts"],
+    };
+    fs.writeFileSync(path.join(dir, "tsconfig.json"), JSON.stringify(config, null, 2), "utf8");
+
+    const parsed = ts.parseJsonConfigFileContent(config, ts.sys, dir);
+    const options = parsed.options;
+    const host = ts.createCompilerHost(options, true);
+    const program = ts.createProgram({ rootNames: parsed.fileNames, options, host });
+
+    const prefix = dir + path.sep;
+    const diagnostics = ts
+      .getPreEmitDiagnostics(program)
+      .map((dg) => {
+        const fileName = dg.file ? dg.file.fileName.replace(prefix, "") : "(program)";
+        let line = 1;
+        let col = 1;
+        if (dg.file && typeof dg.start === "number") {
+          const pos = dg.file.getLineAndCharacterOfPosition(dg.start);
+          line = pos.line + 1;
+          col = pos.character + 1;
+        }
+        return {
+          file: fileName,
+          line,
+          col,
+          code: dg.code,
+          severity: dg.category === ts.DiagnosticCategory.Error ? "error" : "warning",
+          message: ts.flattenDiagnosticMessageText(dg.messageText, " "),
+        };
       });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, errors: diags.filter(d => d.severity === "error").length, diagnostics: diags }));
-    } catch (e) { res.writeHead(500); res.end(JSON.stringify({ ok: false, error: String(e).slice(0, 200) })); }
+
+    return {
+      ok: true,
+      errors: diagnostics.filter((d) => d.severity === "error").length,
+      warnings: diagnostics.filter((d) => d.severity === "warning").length,
+      files: parsed.fileNames.length,
+      diagnostics,
+    };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+fs.mkdirSync(RUN_ROOT, { recursive: true });
+
+const server = http.createServer((req, res) => {
+  if (req.method === "GET" && req.url === "/health") {
+    return sendJson(res, 200, { ok: true, service: "celld-typescript-check", typescript: ts.version });
+  }
+  if (req.method !== "POST" || req.url !== "/check") {
+    return sendJson(res, 404, { ok: false, error: "unknown route" });
+  }
+
+  let body = "";
+  let overflow = false;
+  req.on("data", (chunk) => {
+    body += chunk;
+    if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+      overflow = true;
+      req.destroy();
+    }
   });
-}).listen(8080, () => console.log("[ts-check] listening :8080"));
+  req.on("end", () => {
+    if (overflow) return sendJson(res, 413, { ok: false, error: "body too large" });
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch (e) {
+      return sendJson(res, 400, { ok: false, error: "invalid json" });
+    }
+    try {
+      sendJson(res, 200, runCheck(payload.files || {}, payload.compilerOptions));
+    } catch (e) {
+      sendJson(res, 500, { ok: false, error: String(e && e.message ? e.message : e).slice(0, 300) });
+    }
+  });
+});
+
+server.listen(8080, () => {
+  console.log("[celld-typescript-check] listening :8080 (typescript " + ts.version + ")");
+});

@@ -38,12 +38,34 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: 拉起类型检查服务并自测（已知类型错误必须被检出）
+      - name: 类型检查服务自测（三条都要满足，任一失败即红）
         run: |
           docker run -d --name tsc -p 8080:8080 ghcr.io/observe-life/celld-typescript-check:latest
           for i in $(seq 1 30); do curl -sf http://localhost:8080/health && break; sleep 1; done
-          RES=$(curl -s -X POST -H 'content-type: application/json'             -d '{"files":{"src/demo.ts":"const x: number = \"这是一个字符串，类型标错了\";"}}'             http://localhost:8080/check)
-          echo "$RES" | head -c 400
-          E=$(echo "$RES" | jq '.errors')
-          if [ "$E" -lt 1 ]; then echo "自测失败：类型错误未被检出"; exit 1; fi
-          echo "自测通过：类型错误被检出 ($E)"
+          echo
+
+          # 用例1：只用全局类型与 workers 类型的干净代码，必须 0 错误。
+          # 这一条专治历史上的「lib 一个没加载、满屏 Cannot find global type」还自称通过。
+          CLEAN=$(curl -s -X POST -H 'content-type: application/json' \
+            -d '{"files":{"a.ts":"const m = new Map<string, number>([[\"k\",1]]);\nasync function f(){ for (const v of [1,2,3]) { await Promise.resolve(v); } return m.size; }\nexport default { async fetch(req: Request, env: Env, ctx: ExecutionContext){ const r = await env.MY_KV.get(\"x\"); return Response.json({ ok: !!r, n: ctx.waitUntil(f()) }); } };\n"}}' \
+            http://localhost:8080/check)
+          echo "用例1 干净代码: $(echo "$CLEAN" | head -c 300)"
+          CE=$(echo "$CLEAN" | jq '.errors')
+          [ "$CE" = "0" ] || { echo "自测失败：干净代码被判出 $CE 个错误（lib 或 workers-types 未正确加载）"; exit 1; }
+
+          # 用例2：已知类型错误必须检出。
+          DIRTY=$(curl -s -X POST -H 'content-type: application/json' \
+            -d '{"files":{"b.ts":"const x: number = \"这是一个字符串，类型标错了\";\n"}}' \
+            http://localhost:8080/check)
+          echo "用例2 已知错误: $(echo "$DIRTY" | head -c 300)"
+          DE=$(echo "$DIRTY" | jq '.errors')
+          [ "$DE" -ge 1 ] || { echo "自测失败：已知类型错误未被检出"; exit 1; }
+          echo "$DIRTY" | jq -e '.diagnostics[0].code == 2322' >/dev/null \
+            || { echo "自测失败：检出的不是预期的 TS2322，诊断口径可疑"; exit 1; }
+
+          # 用例3：lib 缺失指纹码（TS2318 找不到全局类型 / TS2583 需要更高 lib）绝不允许出现。
+          if echo "$CLEAN$DIRTY" | grep -qE '"code":(2318|2583|2585)'; then
+            echo "自测失败：出现 lib 缺失指纹码，lib 链没有进入程序"; exit 1
+          fi
+
+          echo "自测通过：干净代码 0 误报、已知错误精确检出、无 lib 缺失指纹"
