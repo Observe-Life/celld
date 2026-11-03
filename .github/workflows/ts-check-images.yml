@@ -2,7 +2,7 @@ name: ts-check images
 
 on:
   push:
-    paths: ["容器/**", ".github/workflows/ts-check-images.yml"]
+    paths: ["实例容器镜像源码/**", ".github/workflows/ts-check-images.yml"]
     branches: [main]
   workflow_dispatch:
 
@@ -18,9 +18,9 @@ jobs:
       matrix:
         include:
           - name: celld-typescript-check
-            context: 容器/celld-typescript-check
+            context: 实例容器镜像源码/celld-typescript-check
           - name: celld-wake-container
-            context: 容器/celld-wake-container
+            context: 实例容器镜像源码/celld-wake-container
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
