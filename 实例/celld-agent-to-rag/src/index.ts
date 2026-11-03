@@ -57,9 +57,32 @@ async function startSessions(env: Env, items: WorkItem[]) {
     const wf = instanceId(it.uuid, it.updated_at);
     return { id: wf, params: { uuid: it.uuid, wf } };
   });
-  if (!batch.length) return { started: [] as string[], deduped: 0 };
+  if (!batch.length) return { started: [] as string[], restarted: [] as string[], deduped: 0 };
   const created = await env.SYNC_FLOW.createBatch(batch);
-  return { started: created.map((i) => i.id), deduped: batch.length - created.length };
+  const createdIds = new Set(created.map((i) => i.id));
+  const skipped = batch.filter((b) => !createdIds.has(b.id));
+
+  // 被平台跳过的实例号说明它已存在：运行中的保持不动（这正是我们要的去重），
+  // 已到终态的必须 restart()，否则「台账落后但实例号已用掉」的会话会永久卡死——
+  // 旧形态靠队列重投自愈，新形态必须显式给出这条重跑通道。
+  const restarted: string[] = [];
+  for (const it of skipped) {
+    try {
+      const inst = await env.SYNC_FLOW.get(it.id);
+      const st = (await inst.status()) as { status?: string };
+      if (st.status === "complete" || st.status === "errored" || st.status === "terminated") {
+        await inst.restart();
+        restarted.push(it.id);
+      }
+    } catch {
+      /* 查不到就跳过，下一轮对账还会再来 */
+    }
+  }
+  return {
+    started: created.map((i) => i.id),
+    restarted,
+    deduped: skipped.length - restarted.length,
+  };
 }
 
 export default {
@@ -104,7 +127,7 @@ export default {
         ledger.parse_status === "completed";
       if (dup) return Response.json({ ok: true, queued: false, skipped: true });
       const r = await startSessions(env, [{ uuid: raw.uuid, updated_at: raw.updated_at }]);
-      return Response.json({ ok: true, queued: r.started.length > 0, deduped: r.deduped > 0 });
+      return Response.json({ ok: true, queued: r.started.length > 0, restarted: r.restarted.length > 0, deduped: r.deduped > 0 });
     }
 
     // 镜像清单：插件据此对齐文件夹
@@ -197,6 +220,7 @@ export default {
         kb: result.kb,
         found: result.items.length,
         started: r.started,
+        restarted: r.restarted,
         deduped: r.deduped,
       });
     }
@@ -240,6 +264,7 @@ export default {
         cron: (controller as { cron?: string })?.cron,
         found: result.items.length,
         started: r.started.length,
+        restarted: r.restarted.length,
         deduped: r.deduped,
       }),
     );

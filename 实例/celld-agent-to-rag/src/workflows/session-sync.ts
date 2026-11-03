@@ -10,6 +10,8 @@
 //      L8792：`if (meta !== undefined && skipExisting) return { created: false }`），
 //      因此不再需要 KV 锁，也一并消除了旧实现「拿不到锁就 message.ack() 丢弃消息」的静默丢数据路径。
 //
+// 注意：step 的 timeout 数字单位是**毫秒**（celld harness 抛错原文
+// 「step "upload" timed out after 300 ms」），所以这里一律写字符串时长，避免再踩单位坑。
 // 重放纯净纪律（celld 文档硬要求）：所有副作用与子请求都在 step.do 内；
 // run() 里没有任何挂起超过 60 秒的非步骤代码；步骤结果只回小对象（raw/md 本体一律走 R2 重读，
 // 因为步骤结果上限 1MiB，而带附件的会话原文远超它）。
@@ -79,7 +81,7 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
     // 3. 转写 + 构建 md + 落 R2 —— 全流程最贵的一步，结果持久化后不再重烧
     const built = await step.do(
       "transcribe-and-save",
-      { retries: { limit: 1, delay: 5000 }, timeout: 900 },
+      { retries: { limit: 1, delay: 5000 }, timeout: "15 minutes" },
       async () => {
         const raw = await loadRaw<RawSession>(this.env.FILES, uuid);
         if (!raw) throw new NonRetryableError("RAW_MISSING");
@@ -126,7 +128,7 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
     // 6. 上传 md，拿 knowledge_id
     const up = await step.do(
       "upload",
-      { retries: { limit: 2, delay: 5000 }, timeout: 300 },
+      { retries: { limit: 2, delay: 5000 }, timeout: "5 minutes" },
       async () => {
         const md = await loadMd(this.env.FILES, head.md);
         if (md == null) throw new NonRetryableError("MD_MISSING_AFTER_SAVE");
