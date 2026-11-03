@@ -17,8 +17,8 @@ function lib(name) {
   return undefined;
 }
 function chain(start) { const t = lib(start); if (t) for (const m of t.matchAll(/\/\/\/ *<reference lib="([^"]+)"/g)) lib(m[1]); }
-chain("lib.es2022.d.ts"); chain("lib.webworker.d.ts");
-const WT = fs.readFileSync(require.resolve("@cloudflare/workers-types"), "utf8");
+try { chain("lib.es2022.d.ts"); chain("lib.webworker.d.ts"); } catch (e) { console.error("[ts-check] lib 初始化失败:", e.message); }
+let WT = ""; try { WT = fs.readFileSync(require.resolve("@cloudflare/workers-types/index.d.ts"), "utf8"); LIBS.set("workers-types.d.ts", WT); } catch (e) { console.error("[ts-check] workers-types 读取失败:", e.message); }
 LIBS.set("workers-types.d.ts", WT);
 
 http.createServer((req, res) => {
