@@ -1,0 +1,6 @@
+name: ts-check images
+
+on: 
+  push:
+    paths: ["用-check"images"
+    
