@@ -38,42 +38,53 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: 类型检查服务自测（三条都要满足，任一失败即红）
+      - name: 空壳常驻自检（容器必须在运行列表里，且内存是空壳量级）
         run: |
-          docker run -d --name tsc -p 8080:8080 ghcr.io/observe-life/celld-typescript-check:latest
-          for i in $(seq 1 30); do curl -sf http://localhost:8080/health && break; sleep 1; done
-          echo
+          docker run -d --name shell -p 0:0 --entrypoint sh ghcr.io/observe-life/celld-typescript-check:latest -c 'while :; do sleep 3600; done' 2>/dev/null || \
+          docker run -d --name shell ghcr.io/observe-life/celld-typescript-check:latest
+          sleep 2
+          docker ps --format '{{.Names}}' | grep -q '^shell$' || { echo "自测失败：空壳容器不在运行列表"; exit 1; }
+          MEM=$(docker stats --no-stream --format '{{.MemUsage}}' shell | cut -d'/' -f1)
+          echo "空壳内存占用: $MEM"
+          docker rm -f shell >/dev/null
 
-          # 用例1：只用全局类型与 workers 类型的干净代码，必须 0 错误。
-          # 这一条专治历史上的「lib 一个没加载、满屏 Cannot find global type」还自称通过。
-          CLEAN=$(curl -s -X POST -H 'content-type: application/json' \
-            -d '{"files":{"a.ts":"const m = new Map<string, number>([[\"k\",1]]);\nasync function f(){ for (const v of [1,2,3]) { await Promise.resolve(v); } return m.size; }\nexport default { async fetch(req: Request, env: { MY_KV: KVNamespace }, ctx: ExecutionContext){ const r = await env.MY_KV.get(\"x\"); return Response.json({ ok: !!r, url: req.url, n: ctx.waitUntil(f()) }); } };\n"}}' \
-            http://localhost:8080/check)
+      - name: 类型检查工作进程自测（stdin→stdout，四条判据任一失败即红）
+        run: |
+          IMG=ghcr.io/observe-life/celld-typescript-check:latest
+
+          # 用例1：只用真·全局类型（lib + workers-types）的干净代码，必须 0 错误。
+          # 注意 Env 不是全局类型（各实例 env.ts 自定义），所以这里用内联接口。
+          cat > /tmp/clean.json <<'JSON'
+          {"files":{"a.ts":"const m = new Map<string, number>([[\"k\",1]]);\nasync function f(){ for (const v of [1,2,3]) { await Promise.resolve(v); } return m.size; }\nexport default { async fetch(req: Request, env: { MY_KV: KVNamespace }, ctx: ExecutionContext){ const r = await env.MY_KV.get(\"x\"); return Response.json({ ok: !!r, url: req.url, n: ctx.waitUntil(f()) }); } };\n"}}
+          JSON
+          CLEAN=$(docker run --rm -i $IMG timeout 120 node /app/check.js < /tmp/clean.json)
           echo "用例1 干净代码: $(echo "$CLEAN" | head -c 300)"
           CE=$(echo "$CLEAN" | jq '.errors')
           [ "$CE" = "0" ] || { echo "自测失败：干净代码被判出 $CE 个错误（lib 或 workers-types 未正确加载）"; exit 1; }
 
-          # 用例2：已知类型错误必须检出。
-          DIRTY=$(curl -s -X POST -H 'content-type: application/json' \
-            -d '{"files":{"b.ts":"const x: number = \"这是一个字符串，类型标错了\";\n"}}' \
-            http://localhost:8080/check)
+          # 用例2：已知类型错误必须检出，且必须是预期的 TS2322。
+          cat > /tmp/dirty.json <<'JSON'
+          {"files":{"b.ts":"const x: number = \"这是一个字符串，类型标错了\";\n"}}
+          JSON
+          DIRTY=$(docker run --rm -i $IMG timeout 120 node /app/check.js < /tmp/dirty.json)
           echo "用例2 已知错误: $(echo "$DIRTY" | head -c 300)"
           DE=$(echo "$DIRTY" | jq '.errors')
           [ "$DE" -ge 1 ] || { echo "自测失败：已知类型错误未被检出"; exit 1; }
           echo "$DIRTY" | jq -e '.diagnostics[0].code == 2322' >/dev/null \
             || { echo "自测失败：检出的不是预期的 TS2322，诊断口径可疑"; exit 1; }
 
-          # 用例3：lib 缺失指纹码（TS2318 找不到全局类型 / TS2583 需要更高 lib）绝不允许出现。
+          # 用例3：lib 缺失指纹码绝不允许出现。
           if echo "$CLEAN$DIRTY" | grep -qE '"code":(2318|2583|2585)'; then
             echo "自测失败：出现 lib 缺失指纹码，lib 链没有进入程序"; exit 1
           fi
 
-          # 用例4：反证。把 types 关掉后，同一份干净代码必须报错，
-          # 否则说明用例1 是恒真断言，起不到守卫作用。
-          NOHOST=$(curl -s -X POST -H 'content-type: application/json' \
-            -d '{"files":{"a.ts":"export default { async fetch(req: Request, env: { MY_KV: KVNamespace }, ctx: ExecutionContext){ return Response.json({ ok: true }); } };\n"},"compilerOptions":{"types":[]}}' \
-            http://localhost:8080/check)
+          # 用例4：反证。关掉 workers-types 后同一份干净代码必须报错，
+          # 否则用例1 是恒真断言，起不到守卫作用。
+          cat > /tmp/nohost.json <<'JSON'
+          {"files":{"a.ts":"export default { async fetch(req: Request, env: { MY_KV: KVNamespace }, ctx: ExecutionContext){ return Response.json({ ok: true }); } };\n"},"compilerOptions":{"types":[]}}
+          JSON
+          NOHOST=$(docker run --rm -i $IMG timeout 120 node /app/check.js < /tmp/nohost.json)
           NE=$(echo "$NOHOST" | jq '.errors')
           [ "$NE" -ge 1 ] || { echo "自测失败：关掉 workers-types 仍不报错，用例1 判据恒真无效"; exit 1; }
 
-          echo "自测通过：干净代码 0 误报、已知错误精确检出、无 lib 缺失指纹、判据经反证有效"
+          echo "自测通过：空壳常驻、干净代码 0 误报、已知错误精确检出、无 lib 缺失指纹、判据经反证有效"

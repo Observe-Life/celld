@@ -65,13 +65,13 @@ services:
       timeout: 5s
       retries: 3
     networks: [backend]
-  # ===== 类型检查：常驻待命容器 + 唤醒器（celld-wake-container 负责 start/stop/转发）=====
-  # 待命容器用 profile 隔离：docker compose up 不会自动拉起它，平时零内存占用
+  # ===== 类型检查：常驻空壳容器 + 唤醒器（node 工作进程按需 exec，跑完即走）=====
+  # 容器常驻是为了让它一直出现在「正运行列表」里：镜像被活跃容器引用，
+  # 不会被清理工具判定成「没在用的垃圾镜像」。空壳本身只占 840KiB。
   celld-typescript-check:
     image: ghcr.io/observe-life/celld-typescript-check:latest
     container_name: celld-typescript-check
-    profiles: ["standby"]
-    restart: "no"
+    restart: unless-stopped
     mem_limit: 512m
     stop_grace_period: 3s
     networks: [backend]
@@ -82,11 +82,7 @@ services:
     restart: unless-stopped
     mem_limit: 64m
     environment:
-      CELLD_WAKE_IDLE_SECS: "${CELLD_WAKE_IDLE_SECS:-600}"
-      CELLD_WAKE_START_TIMEOUT: "${CELLD_WAKE_START_TIMEOUT:-40}"
-      CELLD_WAKE_FORWARD_TIMEOUT: "${CELLD_WAKE_FORWARD_TIMEOUT:-180}"
-    ports:
-      - "127.0.0.1:8081:8081"
+      CELLD_WAKE_CHECK_TIMEOUT: "${CELLD_WAKE_CHECK_TIMEOUT:-180}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [backend]
