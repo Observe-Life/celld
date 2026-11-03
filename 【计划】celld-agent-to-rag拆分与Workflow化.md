@@ -22,7 +22,7 @@
 ## 二、调研得到的关键事实（设计的地基）
 
 1. **实例间零业务互调**（全量 grep `env.*` 使用计数）：kb-sync 只用 STATE(27)/FILES(9)/QUEUE(4)，`MM`、`SCHEDULER` **零调用**；multimedia 只用 PIPELINE(2)，`KBSYNC` **零调用**；只有 scheduler 真的调用两者。→ 旧文档「互绑闭包」纪律是死绑定，本次作废。
-2. **celld 支持 bucket 前缀**（`crates/celld/bucket.rs` L268-295），但官方 `docs/limitations.md` 明确「一个舰队跑一个应用」「fleet bucket 控制整个舰队」。→ 拆分 = 新舰队 = 新桶。
+2. **celld 支持 bucket 前缀**（`crates/celld/bucket.rs` L268-295），但官方 `docs/limitations.md` 明确「一个 fleet 只跑一个应用」「fleet bucket 控制整个 fleet」。→ 拆分 = 新容器 = 新桶（此处 fleet 为上游原文用词，对应本框架的「容器」）。
 3. **Workflows 能力**（`docs/services/workflows.md`）：等待期间 `A waiting instance holds no isolate`；并发实例数不设上限；step 结果持久化、失败只重跑该步；deadline 崩溃不移动。**硬限制**：非步骤代码挂起 ≤60s；步骤结果/入参/事件各 ≤1MiB；retention ≤30d；无 REST API（只能经 binding 驱动）。
 4. **当前瓶颈是设计性的**：`waitParse` 每 5 秒轮询、最长 600 秒，全程占着 isolate，`max_concurrency=2` 因此成为硬上限（≈12 篇/小时）。
 5. **当前形态没有故障**（近 6 小时实测：`done` 14 次、`lock skip` 0 次、无预算超限、无死信）→ 本次是执行模型纠偏，不是救火。
@@ -40,7 +40,7 @@
 
 | 信号 | 命中 | 处置 |
 |---|---|---|
-| persistence / source-of-truth | ✅ 新桶、KV 台账与 R2 迁移 | canonical owner = 新舰队；旧桶旧容器**保留不动**作回滚位 |
+| persistence / source-of-truth | ✅ 新桶、KV 台账与 R2 迁移 | canonical owner = 新容器；旧桶旧容器**保留不动**作回滚位 |
 | contract | ✅ 实例入口从 scheduler 前门 `/kb/*` 变为直接根路径 | 插件 `worker_url` 是唯一消费者，实测确认只此一处 |
 | retirement | ✅ 队列、KV 锁、互绑闭包纪律 | delete-first（内部代码），见第八节 |
 | duplicate owner | ✅ 队列与 workflow 都提供重试/状态 | 去掉队列，workflow 单一 owner |

@@ -12,16 +12,20 @@ chmod 600 wrangler.jsonc secrets.json
 
 # ===== 上线前闸门（celld-preflight）：L0+L1 不过即拒绝部署；--skip-gates 显式绕过并留痕 =====
 GATES="${CELLD_PREFLIGHT_GATES:-/vol1/docker/astrbot/data/plugins/astrbot_plugin_celld_preflight/skills/celld-preflight/gates}"
-SKIP=0
-for a in "$@"; do [ "$a" = "--skip-gates" ] && SKIP=1; done
+SKIP=0; RESTART=0
+for a in "$@"; do
+  [ "$a" = "--skip-gates" ] && SKIP=1
+  [ "$a" = "--restart" ] && RESTART=1
+done
 if [ "$SKIP" = "1" ]; then
   echo "[gates] 显式跳过闸门（已留痕 .gates-audit.log）"
   echo "$(date -Is) SKIP-GATES user=$(id -un) target:celld-agent-to-rag" >> .gates-audit.log
 else
   [ -f acceptance.json ] || { echo "[gates] FAIL: 缺少 acceptance.json"; exit 1; }
   bash "$GATES/preflight.sh" "$(pwd)/acceptance.json" || { echo "[gates] L0 预检失败，拒绝部署"; exit 1; }
+  bash "$GATES/platform-contract.sh" "$(pwd)" || { echo "[gates] L1.5 平台契约检查失败，拒绝部署"; exit 1; }
   bash "$GATES/typecheck.sh" "$(pwd)" || { echo "[gates] L1 类型检查失败，拒绝部署"; exit 1; }
-  echo "[gates] L0+L1 通过"
+  echo "[gates] L0+L1.5+L1 通过"
 fi
 # =====================================================================
 #!/bin/sh
@@ -57,4 +61,8 @@ docker run --rm --network backend -v "$(pwd)":/app -w /app \
   -e AWS_ACCESS_KEY_ID=$MINIO_ROOT_USER -e AWS_SECRET_ACCESS_KEY=$MINIO_ROOT_PASSWORD \
   -e S3_ENDPOINT=http://minio:9000 -e AWS_REGION=us-east-1 \
   celld-full:latest deploy . --bucket s3://celld-rag
-docker restart celld-agent-to-rag >/dev/null && echo "celld-agent-to-rag restarted to load new bundle"
+if [ "$RESTART" = "1" ]; then
+  docker restart celld-agent-to-rag >/dev/null && echo "restarted (--restart)"
+else
+  echo "不重启：节点将在下一次指针轮询自动采纳新版本（实测约 15 秒）"
+fi

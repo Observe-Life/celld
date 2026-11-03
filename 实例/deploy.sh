@@ -6,10 +6,11 @@ cd "$(dirname "$0")"
 
 # ===== 上线前闸门（celld-preflight）：L0+L1 不过即拒绝部署；--skip-gates 显式绕过并留痕 =====
 GATES="${CELLD_PREFLIGHT_GATES:-/vol1/docker/astrbot/data/plugins/astrbot_plugin_celld_preflight/skills/celld-preflight/gates}"
-SKIP=0; ALLOWLIST=""
+SKIP=0; ALLOWLIST=""; RESTART=0
 for a in "$@"; do
   case "$a" in
     --skip-gates) SKIP=1 ;;
+    --restart) RESTART=1 ;;
     *) [ -z "$ALLOWLIST" ] && ALLOWLIST="$a" ;;
   esac
 done
@@ -21,15 +22,21 @@ else
   bash "$GATES/preflight.sh" "$(pwd)/acceptance.json" || { echo "[gates] L0 预检失败，拒绝部署"; exit 1; }
   DIRS=$(python3 -c "import json;print(' '.join(json.load(open('acceptance.json')).get('typecheck_dirs',[])))")
   for d in $DIRS; do
+    bash "$GATES/platform-contract.sh" "$(pwd)/$d" || { echo "[gates] L1.5 平台契约检查失败（$d），拒绝部署"; exit 1; }
     bash "$GATES/typecheck.sh" "$(pwd)/$d" || { echo "[gates] L1 类型检查失败（$d），拒绝部署"; exit 1; }
   done
-  echo "[gates] L0+L1 通过"
+  echo "[gates] L0+L1.5+L1 通过"
 fi
 # =====================================================================
 
 ./multimedia/deploy.sh
 # kb-sync 已拆分为独立容器 celld-agent-to-rag（见 实例/celld-agent-to-rag/），本套件不再部署它
 ./scheduler/deploy.sh
-# celld 只在根指针变化时重走闭包；组件单独更新需重启节点生效（20秒，状态在桶里无损）
-docker restart celld >/dev/null && echo "node restarted to load new components"
+# 铁律 3 已于 2026-11-04 实测作废：celld 0.6.3 会在下一次指针轮询自动采纳新版本（约 15 秒），
+# 因此默认不再重启节点（省掉约 20 秒现网中断）。需要立即生效时显式传 --restart。
+if [ "$RESTART" = "1" ]; then
+  docker restart celld >/dev/null && echo "node restarted (--restart)"
+else
+  echo "不重启：节点将在下一次指针轮询自动采纳新版本（实测约 15 秒）"
+fi
 echo "suite deployed"

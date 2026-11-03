@@ -3,7 +3,7 @@
 ## 〇、使用 celld 的基本框架（2026-11-03 起，**以本节为准**）
 
 * **一个 celld 实例**：由一个或多个 celld 功能模块组成
-* **一个 celld 容器**：由一个或多个互相关联的 celld 实例组成
+* **一个 celld 容器**：由一个或一组互相关联的 celld 实例组成（上游英文文档称 fleet，本框架统一叫**容器**）
 * **celld 容器的分类**
   1. **活跃容器**：高频使用；持续占用一定的算力、内存
   2. **待命容器**：低频使用；按需唤醒、闲置自停，暂停时容器仍在「正在运行的容器列表」，但只占用极少的算力、内存
@@ -56,7 +56,7 @@
 
 | # | 限制 | 出处 |
 |---|---|---|
-| 1 | **一个舰队（fleet）同一时刻只跑一个“应用根”**：每次 `celld deploy` 都会无条件改写全局指针 `deploy/current.json`，谁最后部署谁当根 | `crates/celld/deploy.rs` L937-946（注释原文：“the fleet-wide one is the sole application selector”） |
+| 1 | **一个容器同一时刻只跑一个“应用根”**：每次 `celld deploy` 都会无条件改写全局指针 `deploy/current.json`，谁最后部署谁当根 | `crates/celld/deploy.rs` L937-946（注释原文：“the fleet-wide one is the sole application selector”；上游英文文档里的 fleet，本框架统一称**容器**） |
 | 2 | **cron 定时只有“根”会触发**；被 service 绑定带进来的 cohosted worker，其 cron 永不触发（只警告不报错） | `crates/celld/generation.rs` L210-228（注释原文：“a node fires only its own deployment's schedule… Deploy the script as a node's own deployment to run its crons”） |
 | 3 | **组件（cohosted worker）单独更新不会自动生效**：节点只在根指针变化时重走依赖闭包；组件指针变了但根没变时，运行中的仍是旧 bundle | 实测复现；`crates/celld/main.rs` `start_pointer_watcher` 以全局指针为触发源 |
 | 4 | **队列 sendBatch 单次上限 100 条**，超出直接报错 `QUEUE_ERROR: a batch has at most 100 messages` | `crates/logic/queue.rs` 及运行时校验 |
@@ -66,17 +66,17 @@
 ## 二、我们的解法：单容器多 worker 架构
 
 ```
-celld（活跃容器 = 一个舰队）
-├── scheduler              ← 本舰队的根：cron 表 + 前门转发（/mm/*）
+celld（活跃容器）
+├── scheduler              ← 本容器的根：cron 表 + 前门转发（/mm/*）
 └── multimedia-pipeline    ← 多媒体转写（Workflows）
 
-celld-agent-to-rag（活跃容器 = 另一个舰队，桶 s3://celld-rag）
-└── celld-agent-to-rag     ← 自己就是根：自带 cron + Workflow 会话同步
+celld-agent-to-rag（另一个活跃容器，桶 s3://celld-rag）
+└── celld-agent-to-rag     ← 自己就是本容器的根：自带 cron + Workflow 会话同步
 
 celld-typescript-check（待命容器）+ celld-wake-container（活跃唤醒入口）
 
-注：「一个容器 = 一个舰队」仍然成立（限制 1 未变）；变的是整机有多个 celld 容器。
-    跨容器**没有** service 绑定（celld 的 services 只在舰队内有效），
+注：「一个容器只跑一个应用根」这条限制没变（限制 1）；变的是整机有多个 celld 容器。
+    跨容器**没有** service 绑定（celld 的 services 只在同一容器内有效），
     容器之间要互访只能走「容器名:机内端口」的 HTTP。
 ```
 
@@ -99,7 +99,7 @@ celld-typescript-check（待命容器）+ celld-wake-container（活跃唤醒入
 
 ### celld-agent-to-rag：会话导入知识库（Workflow 形态）
 
-从 `celld` 容器拆出的独立活跃容器，桶 `s3://celld-rag`，自己就是舰队的根（cron 直接写在它身上）。
+从 `celld` 容器拆出的独立活跃容器，桶 `s3://celld-rag`，自己就是本容器的根（cron 直接写在它身上）。
 
 执行模型的关键选择：
 
@@ -140,15 +140,15 @@ for (let i = 0; i < uuids.length; i += 100) {
 
 ## 四、必须保持的纪律（防事故）
 
-1. **带 cron 的实例必须是它所在舰队的根**（限制 2）：`celld` 舰队的根是 scheduler，`celld-agent-to-rag` 舰队的根是它自己；
-   每个容器的部署脚本都把该舰队的根放在最后部署；
+1. **带 cron 的实例必须是它所在容器的根**（限制 2）：`celld` 容器的根是 scheduler，`celld-agent-to-rag` 容器的根是它自己；
+   每个容器的部署脚本都把本容器的根放在最后部署；
 2. **epoch GC 常开**：容器环境 `CELLD_LTX_RETENTION_SECS=604800`（防限制 2/失败循环造成的桶侧堆积）；本地 `data/state/` 目录若再出现成百上千 epoch（该目录已从 `state/` 更名为 `data/`），说明又进了失败启动循环，先停循环（恢复闭包完整）再清残骸；
 3. **处理预算**：`CELLD_HANDLER_BUDGET_S=900`（长转写/等解析别被默认 300s 掐死）；
 4. **大表批量删除前先建索引或按主键点名**（与 celld 无关，但我们在同一台 NAS 上吃过全表扫描的亏：4GB 库机械盘 1 小时 0 写入）。
 
 ## 五、与 Cloudflare 的差异（为什么需要这份指南）
 
-Cloudflare 账号级平台天然支持“N 个独立 worker 各自部署、各自定时、互不干扰”；celld 的定位是“**一个舰队跑一个应用**”（README L214），没有账号级多应用调度。该架构用“互绑闭包 + 中央调度器 + 部署重启”在**单个 celld 容器内**重建了 CF 的使用体验：worker 数量增长不增加容器，定时规则增长只改一张表。2026-11-03 起再叠加一层：低频能力（如类型检查）不进 celld 容器，改为独立的待命容器 + 活跃唤醒容器，见顶部框架节。
+Cloudflare 账号级平台天然支持“N 个独立 worker 各自部署、各自定时、互不干扰”；celld 的定位是“**一个容器只跑一个应用**”（README L214），没有账号级多应用调度。该架构用“互绑闭包 + 中央调度器 + 部署重启”在**单个 celld 容器内**重建了 CF 的使用体验：worker 数量增长不增加容器，定时规则增长只改一张表。2026-11-03 起再叠加一层：低频能力（如类型检查）不进 celld 容器，改为独立的待命容器 + 活跃唤醒容器，见顶部框架节。
 
 ---
 *最后更新：2026-11-03（顶部新增实例/容器/活跃/待命框架与待命容器标准做法；旧版内容就地校正路径与容器拓扑）。改动 celld 部署结构前请先阅读本文并对照源码行号复核（上游版本迭代可能改变行为）。*
