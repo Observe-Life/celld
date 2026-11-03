@@ -22,10 +22,10 @@ else
   bash "$GATES/preflight.sh" "$(pwd)/acceptance.json" || { echo "[gates] L0 预检失败，拒绝部署"; exit 1; }
   DIRS=$(python3 -c "import json;print(' '.join(json.load(open('acceptance.json')).get('typecheck_dirs',[])))")
   for d in $DIRS; do
-    bash "$GATES/platform-contract.sh" "$(pwd)/$d" || { echo "[gates] L1.5 平台契约检查失败（$d），拒绝部署"; exit 1; }
+    bash "$GATES/platform-contract.sh" "$(pwd)/$d" || { echo "[gates] L0.5 平台契约检查失败（$d），拒绝部署"; exit 1; }
     bash "$GATES/typecheck.sh" "$(pwd)/$d" || { echo "[gates] L1 类型检查失败（$d），拒绝部署"; exit 1; }
   done
-  echo "[gates] L0+L1.5+L1 通过"
+  echo "[gates] L0+L0.5+L1 通过"
 fi
 # =====================================================================
 
