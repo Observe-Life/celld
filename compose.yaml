@@ -80,6 +80,10 @@ services:
     container_name: celld-wake-container
     restart: unless-stopped
     mem_limit: 64m
+    environment:
+      CELLD_WAKE_IDLE_SECS: "${CELLD_WAKE_IDLE_SECS:-600}"
+      CELLD_WAKE_START_TIMEOUT: "${CELLD_WAKE_START_TIMEOUT:-40}"
+      CELLD_WAKE_FORWARD_TIMEOUT: "${CELLD_WAKE_FORWARD_TIMEOUT:-180}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [backend]

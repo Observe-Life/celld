@@ -10,15 +10,16 @@
 """
 import docker
 import json
+import os
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-IDLE_SECS = 600          # 空闲多少秒后停掉待命容器
-START_TIMEOUT = 40       # 唤醒后等待就绪的最长秒数
-FORWARD_TIMEOUT = 180    # 一次类型检查的最长秒数
+IDLE_SECS = int(os.environ.get("CELLD_WAKE_IDLE_SECS", "600"))  # 空闲多久停回待命
+START_TIMEOUT = int(os.environ.get("CELLD_WAKE_START_TIMEOUT", "40"))  # 唤醒就绪上限
+FORWARD_TIMEOUT = int(os.environ.get("CELLD_WAKE_FORWARD_TIMEOUT", "180"))  # 单次检查上限
 
 # 受管待命容器：容器名 -> 机内服务地址与端口（backend 网桥内按容器名解析）
 MANAGED = {
@@ -30,7 +31,7 @@ last_used = [time.time()]
 
 
 def container_state(name):
-    """返回受管容器状态：running / exited / missing。"""
+    """返回受管容器状态：running / created / exited / missing。"""
     try:
         return cli.containers.get(name).status
     except Exception:
