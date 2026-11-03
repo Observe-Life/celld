@@ -47,7 +47,7 @@ jobs:
           # 用例1：只用全局类型与 workers 类型的干净代码，必须 0 错误。
           # 这一条专治历史上的「lib 一个没加载、满屏 Cannot find global type」还自称通过。
           CLEAN=$(curl -s -X POST -H 'content-type: application/json' \
-            -d '{"files":{"a.ts":"const m = new Map<string, number>([[\"k\",1]]);\nasync function f(){ for (const v of [1,2,3]) { await Promise.resolve(v); } return m.size; }\nexport default { async fetch(req: Request, env: Env, ctx: ExecutionContext){ const r = await env.MY_KV.get(\"x\"); return Response.json({ ok: !!r, n: ctx.waitUntil(f()) }); } };\n"}}' \
+            -d '{"files":{"a.ts":"const m = new Map<string, number>([[\"k\",1]]);\nasync function f(){ for (const v of [1,2,3]) { await Promise.resolve(v); } return m.size; }\nexport default { async fetch(req: Request, env: { MY_KV: KVNamespace }, ctx: ExecutionContext){ const r = await env.MY_KV.get(\"x\"); return Response.json({ ok: !!r, url: req.url, n: ctx.waitUntil(f()) }); } };\n"}}' \
             http://localhost:8080/check)
           echo "用例1 干净代码: $(echo "$CLEAN" | head -c 300)"
           CE=$(echo "$CLEAN" | jq '.errors')
@@ -68,4 +68,12 @@ jobs:
             echo "自测失败：出现 lib 缺失指纹码，lib 链没有进入程序"; exit 1
           fi
 
-          echo "自测通过：干净代码 0 误报、已知错误精确检出、无 lib 缺失指纹"
+          # 用例4：反证。把 types 关掉后，同一份干净代码必须报错，
+          # 否则说明用例1 是恒真断言，起不到守卫作用。
+          NOHOST=$(curl -s -X POST -H 'content-type: application/json' \
+            -d '{"files":{"a.ts":"export default { async fetch(req: Request, env: { MY_KV: KVNamespace }, ctx: ExecutionContext){ return Response.json({ ok: true }); } };\n"},"compilerOptions":{"types":[]}}' \
+            http://localhost:8080/check)
+          NE=$(echo "$NOHOST" | jq '.errors')
+          [ "$NE" -ge 1 ] || { echo "自测失败：关掉 workers-types 仍不报错，用例1 判据恒真无效"; exit 1; }
+
+          echo "自测通过：干净代码 0 误报、已知错误精确检出、无 lib 缺失指纹、判据经反证有效"

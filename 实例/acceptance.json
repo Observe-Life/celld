@@ -31,16 +31,14 @@
     },
     "services": [
       "MM",
-      "SCHEDULER",
-      "TSC"
+      "SCHEDULER"
     ],
     "d1": false,
     "do": false,
     "workflows": false,
     "containers": false,
     "worker_loaders": false,
-    "assets": false,
-    "ts_check": true
+    "assets": false
   },
   "external_probes": [
     {
@@ -62,18 +60,29 @@
         "list_shape",
         "state_machine"
       ]
+    },
+    {
+      "name": "celld-typescript-check",
+      "base_url": "http://celld-wake-container:8081",
+      "standby_container": "celld-typescript-check",
+      "checks": [
+        "health",
+        "check_roundtrip"
+      ],
+      "note": "常驻待命容器，由 celld-wake-container 唤醒/转发/空闲停止；只认唤醒器地址，不直连待命容器"
     }
   ],
   "typecheck": {
     "enabled": true,
-    "image": "node:22-alpine"
+    "owner": "celld-typescript-check",
+    "entrypoint": "http://celld-wake-container:8081/check",
+    "pass_criteria": "errors==0 且无 lib 缺失指纹码 TS2318/TS2583/TS2585"
   },
   "config_generated": "kb-sync/wrangler.jsonc",
   "config_injected_keys": [
     "SYNC_ALLOWLIST"
   ],
   "typecheck_dirs": [
-    "kb-sync",
-    "ts-check"
+    "kb-sync"
   ]
 }
