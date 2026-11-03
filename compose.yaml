@@ -20,7 +20,8 @@ services:
     entrypoint: >
       sh -c "
       mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
-      mc mb --ignore-existing local/celld-fleet"
+      mc mb --ignore-existing local/celld-fleet &&
+      mc mb --ignore-existing local/celld-rag"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -85,6 +86,42 @@ services:
       CELLD_WAKE_CHECK_TIMEOUT: "${CELLD_WAKE_CHECK_TIMEOUT:-180}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    networks: [backend]
+
+  # ===== celld-agent-to-rag：智能体会话导入知识库（独立活跃容器 = 独立舰队 = 独立桶）=====
+  # 与 celld 主容器共用同一镜像 celld-full，只靠 CELLD_BUCKET 与 state 目录区分舰队。
+  # 机内地址：celld-agent-to-rag:8080（插件推送与闸门都走容器名，不用任何 IP）。
+  celld-agent-to-rag:
+    image: celld-full:latest
+    container_name: celld-agent-to-rag
+    restart: unless-stopped
+    mem_limit: 512m
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      CELLD_BUCKET: "s3://celld-rag"
+      S3_ENDPOINT: "http://minio:9000"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      CELLD_WATCH: "/var/lib/celld/state"
+      CELLD_HANDLER_BUDGET_S: "900"
+      CELLD_LTX_RETENTION_SECS: "604800"
+    volumes:
+      - /vol1/docker/celld-agent-to-rag/data:/var/lib/celld
+    command:
+      - --listen
+      - 0.0.0.0:8080
+      - --internal-listen
+      - 0.0.0.0:8081
+      - --advertise
+      - celld-agent-to-rag:8081
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks: [backend]
 
 networks:

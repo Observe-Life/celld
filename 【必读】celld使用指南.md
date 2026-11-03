@@ -37,7 +37,8 @@
 
 | 容器 | 归类 | 占用 | 说明 |
 |---|---|---|---|
-| `celld` | 活跃 | 177MiB | 装着 scheduler + kb-sync + multimedia 三个实例 |
+| `celld` | 活跃 | 177MiB | 装着 scheduler + multimedia 两个实例（会话同步已拆出） |
+| `celld-agent-to-rag` | 活跃 | 约 180MiB | 智能体会话导入知识库；Workflow 形态，自带 cron |
 | `celld-wake-container` | 活跃 | 22.65MiB | 待命容器的唯一唤醒入口，挂 `docker.sock` |
 | `celld-typescript-check` | 待命 | 空壳 916KiB | 类型检查；node 进程仅在检查的 1-2 秒内存在 |
 
@@ -65,19 +66,27 @@
 ## 二、我们的解法：单容器多 worker 架构
 
 ```
-celld（一个活跃容器 = 一个舰队，内含三个实例）
-├── scheduler      ← 常驻根：持有全部 cron 表达式 + 总入口转发（/kb/*、/mm/*）
-├── kb-sync        ← 会话同步（队列消费者 + 幂等短路），不感知时间
-└── multimedia     ← 多媒体转写（Workflows），不感知时间
+celld（活跃容器 = 一个舰队）
+├── scheduler              ← 本舰队的根：cron 表 + 前门转发（/mm/*）
+└── multimedia-pipeline    ← 多媒体转写（Workflows）
 
-注：「一个容器 = 一个舰队」仍然成立（限制 1 未变）；变的是**整机不再只有一个 celld 容器**——
-    待命能力（如类型检查）放在独立容器里，见上面「待命容器的标准做法」。
+celld-agent-to-rag（活跃容器 = 另一个舰队，桶 s3://celld-rag）
+└── celld-agent-to-rag     ← 自己就是根：自带 cron + Workflow 会话同步
+
+celld-typescript-check（待命容器）+ celld-wake-container（活跃唤醒入口）
+
+注：「一个容器 = 一个舰队」仍然成立（限制 1 未变）；变的是整机有多个 celld 容器。
+    跨容器**没有** service 绑定（celld 的 services 只在舰队内有效），
+    容器之间要互访只能走「容器名:机内端口」的 HTTP。
 ```
 
 三条设计原则：
 
-1. **互相 service 绑定**：每个 worker 的 `wrangler.jsonc` 都声明对其余 worker 的 `services` 绑定。
-   依赖遍历有环保护（generation.rs 的 visited 集合），因此**无论谁当根，闭包里永远有全部 worker**，不存在“孤儿 cell 启动失败循环”。
+1. **互相 service 绑定**（~~原纪律~~ → **2026-11-03 作废**）：当时要求每个 worker 都声明对其余 worker 的 `services` 绑定，
+   目的是让依赖闭包里永远有全部 worker，避免「孤儿 cell 启动失败循环」。
+   **实测推翻了它的前提**：全量 grep `env.*` 使用计数后确认，`kb-sync` 从未调用过 `MM`/`SCHEDULER`，
+   `multimedia` 从未调用过 `KBSYNC`——这些绑定是纯声明、零调用，只为满足纪律而存在。
+   现在只在**真正会调用**的实例之间保留绑定（scheduler ↔ multimedia），跨容器一律不声明 service 绑定。
 2. **调度彻底解耦**：所有周期任务集中在 scheduler 的一张路由表：
    ```ts
    const SCHEDULES: Record<string, Route> = {
@@ -87,6 +96,22 @@ celld（一个活跃容器 = 一个舰队，内含三个实例）
    ```
    加一种定时 = 加一行表达式 + 一行路由，**worker 代码零改动**。cron 最小粒度 1 分钟（与 Cloudflare 相同）；秒级需求走 DO alarms 或队列延时，不要塞进 cron。
 3. **部署即重启**：`deploy.sh` 在部署完所有组件后执行 `docker restart celld`（约 20 秒，状态在桶里，无损），绕开限制 3。
+
+### celld-agent-to-rag：会话导入知识库（Workflow 形态）
+
+从 `celld` 容器拆出的独立活跃容器，桶 `s3://celld-rag`，自己就是舰队的根（cron 直接写在它身上）。
+
+执行模型的关键选择：
+
+- **一个会话一个 Workflow 实例**，实例号 = `uuid-版本`（版本取自 `updated_at`）。
+  同版本重复触发由平台静默去重（`createBatch()` 对已存在实例号返回 `created:false`），
+  因此**不需要 KV 锁**——旧实现用 KV 时间戳锁，且拿不到锁就 `message.ack()` 丢弃消息，存在静默丢数据路径。
+- **等解析用 `step.sleep` + 短查询步骤**，而不是在 handler 里同步轮询 600 秒。
+  等待期间实例休眠、不占 isolate（celld 文档原话），所以并发不再被 isolate 卡死。
+- **转写步骤结果持久化**：重放或重试都不会再烧一次 JBB 转写费。
+- **每轮最多创建 2 个实例**（`SYNC_CONCURRENCY`，用户定的保守值，≈旧 `max_concurrency=2` 的吞吐）。
+- 步骤结果/入参各 ≤1MiB，所以 raw 与 md 本体一律留在 R2、步骤只回摘要与哈希。
+- 已知平台差异：`status()` 只返回 `{status, rollback}`，**没有 steps 数组**；终态字符串是 `complete`（不是 `completed`）。
 
 ## 三、操作手册
 
@@ -101,7 +126,8 @@ celld（一个活跃容器 = 一个舰队，内含三个实例）
 |---|---|
 | `GET /health` | scheduler 自身与已注册调度表 |
 | `POST /fire {"cron":"..."}` | 手动触发一条调度（验证派发链） |
-| `POST /kb/run` | 会话同步立即对账一轮 |
+| `POST /run`（在 `celld-agent-to-rag:8080`） | 会话同步立即对账一轮；`GET /status?uuid=` 查 Workflow 实例进度 |
+| `GET /kb/*`（在 `celld:8080`） | **已退役**，返回 404 并提示新地址 |
 | `GET /mm/health`、`POST /mm/run`、`POST /mm/status` | 多媒体转写 |
 
 ### 队列投递（写 worker 代码时）
@@ -114,7 +140,8 @@ for (let i = 0; i < uuids.length; i += 100) {
 
 ## 四、必须保持的纪律（防事故）
 
-1. **不要让带 cron 的 worker 当“最后部署者”以外的角色**——根永远是 scheduler（部署脚本已保证 scheduler 最后部署）；
+1. **带 cron 的实例必须是它所在舰队的根**（限制 2）：`celld` 舰队的根是 scheduler，`celld-agent-to-rag` 舰队的根是它自己；
+   每个容器的部署脚本都把该舰队的根放在最后部署；
 2. **epoch GC 常开**：容器环境 `CELLD_LTX_RETENTION_SECS=604800`（防限制 2/失败循环造成的桶侧堆积）；本地 `data/state/` 目录若再出现成百上千 epoch（该目录已从 `state/` 更名为 `data/`），说明又进了失败启动循环，先停循环（恢复闭包完整）再清残骸；
 3. **处理预算**：`CELLD_HANDLER_BUDGET_S=900`（长转写/等解析别被默认 300s 掐死）；
 4. **大表批量删除前先建索引或按主键点名**（与 celld 无关，但我们在同一台 NAS 上吃过全表扫描的亏：4GB 库机械盘 1 小时 0 写入）。

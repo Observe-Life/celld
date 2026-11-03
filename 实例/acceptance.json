@@ -1,41 +1,26 @@
 {
-  "instance": "kb-sync",
+  "instance": "celld 主容器（scheduler + multimedia）",
   "dir": "/vol1/docker/celld/实例",
-  "config": "kb-sync/wrangler.template.jsonc",
-  "secrets": "kb-sync/secrets.json",
+  "config": "multimedia/wrangler.template.jsonc",
+  "secrets": "multimedia/secrets.json",
   "modules": {
     "worker": true,
     "cron": {
       "root": true,
-      "expressions": [
-        "37 * * * *"
-      ]
+      "expressions": [],
+      "owner": "scheduler",
+      "note": "会话同步的 cron 已随实例迁至 celld-agent-to-rag"
     },
-    "queues": {
-      "producer": "QUEUE",
-      "queue": "kb-conv-sync",
-      "dlq": "kb-conv-sync-dlq",
-      "max_concurrency": 2,
-      "send_batch_limit": 100,
-      "message_max_kb": 128
-    },
-    "kv": {
-      "binding": "STATE",
-      "namespace": "sync-state",
-      "ttl_min_seconds": 60
-    },
-    "r2": {
-      "binding": "FILES",
-      "bucket": "sync-files",
-      "backend": "s3://celld-fleet"
-    },
+    "workflows": true,
+    "queues": false,
+    "kv": false,
+    "r2": false,
     "services": [
       "MM",
       "SCHEDULER"
     ],
     "d1": false,
     "do": false,
-    "workflows": false,
     "containers": false,
     "worker_loaders": false,
     "assets": false
@@ -60,16 +45,6 @@
         "list_shape",
         "state_machine"
       ]
-    },
-    {
-      "name": "celld-typescript-check",
-      "base_url": "http://celld-wake-container:8081",
-      "standby_container": "celld-typescript-check",
-      "checks": [
-        "health",
-        "check_roundtrip"
-      ],
-      "note": "常驻空壳容器，node 工作进程由 celld-wake-container 按需 exec；只认唤醒器机内地址，禁止宿主端口映射或直连"
     }
   ],
   "typecheck": {
@@ -79,11 +54,17 @@
     "delivery": "容器内走容器名:机内端口；宿主机闸门走 docker exec（不开宿主端口）",
     "pass_criteria": "errors==0 且无 lib 缺失指纹码 TS2318/2583/2585；投递失败或回执异常一律 FAIL"
   },
-  "config_generated": "kb-sync/wrangler.jsonc",
+  "config_generated": "multimedia/wrangler.jsonc",
   "config_injected_keys": [
-    "SYNC_ALLOWLIST"
+    "TIKHUB_TOKEN",
+    "RELAY_TOKEN",
+    "GEMINI_KEY",
+    "SUPABASE_KEY",
+    "SERVERCHAN_URL",
+    "SHAPI_KEY"
   ],
-  "typecheck_dirs": [
-    "kb-sync"
-  ]
+  "typecheck_dirs": [],
+  "container": "celld",
+  "container_class": "活跃容器",
+  "note": "本容器含 scheduler 与 multimedia 两个实例，但 acceptance.json 目前是「一实例一声明」结构，这里只以 multimedia 为锚点做 L0；逐实例声明待后续继续拆分时补齐。L1 暂为空：multimedia 有 15 条、scheduler 有 1 条存量类型错误，按 2026-11-03 决策暂不修，因此它们不在闸门覆盖内（不是已通过，是未纳入）。"
 }

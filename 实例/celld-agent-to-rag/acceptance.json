@@ -1,0 +1,49 @@
+{
+  "instance": "celld-agent-to-rag",
+  "container": "celld-agent-to-rag",
+  "container_class": "活跃容器",
+  "dir": "/vol1/docker/celld/实例/celld-agent-to-rag",
+  "config": "wrangler.template.jsonc",
+  "secrets": "secrets.json",
+  "config_generated": "wrangler.jsonc",
+  "config_injected_keys": ["SYNC_ALLOWLIST"],
+  "modules": {
+    "worker": true,
+    "cron": { "root": true, "expressions": ["37 * * * *"] },
+    "workflows": true,
+    "workflow_step_rules": {
+      "non_step_pending_max_s": 60,
+      "step_result_max_mib": 1,
+      "retention_max_days": 30,
+      "side_effects_wrapped_in_step_do": true
+    },
+    "queues": false,
+    "kv": { "binding": "STATE", "namespace": "sync-state", "ttl_min_seconds": 60 },
+    "r2": { "binding": "FILES", "bucket": "sync-files", "backend": "s3://celld-rag" },
+    "services": [],
+    "d1": false,
+    "do": false,
+    "containers": false,
+    "worker_loaders": false,
+    "assets": false
+  },
+  "external_probes": [
+    { "name": "jbb", "base_url": "https://cn.jbbt.cc/v1", "checks": ["models_reachable", "small_completion", "mime_matrix"] },
+    { "name": "weknora", "base_url": "http://weknora-lite:8080", "checks": ["health", "list_shape", "state_machine"] },
+    {
+      "name": "celld-typescript-check",
+      "base_url": "http://celld-wake-container:8081",
+      "standby_container": "celld-typescript-check",
+      "checks": ["health", "check_roundtrip"],
+      "note": "待命容器；只认唤醒器机内地址，禁止宿主端口映射或直连"
+    }
+  ],
+  "typecheck": {
+    "enabled": true,
+    "owner": "celld-typescript-check",
+    "entrypoint": "http://celld-wake-container:8081/check",
+    "delivery": "容器内走容器名:机内端口；宿主机闸门走 docker exec（不开宿主端口）",
+    "pass_criteria": "errors==0 且无 lib 缺失指纹码 TS2318/2583/2585；投递失败或回执异常一律 FAIL"
+  },
+  "typecheck_dirs": ["."]
+}

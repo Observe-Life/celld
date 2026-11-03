@@ -2,11 +2,9 @@
   "name": "scheduler",
   "main": "src/index.ts",
   "compatibility_date": "2026-01-01",
-  "triggers": { "crons": ["37 * * * *"] },
+  "triggers": { "crons": [] },
   "services": [
-    { "binding": "KBSYNC", "service": "kb-sync" },
-    { "binding": "MM", "service": "multimedia-pipeline" },
-    { "binding": "TSC", "service": "ts-check" }
+    { "binding": "MM", "service": "multimedia-pipeline" }
   ],
   "vars": {}
 }

@@ -1,0 +1,247 @@
+// celld-agent-to-rag：智能体会话导入知识库（独立活跃容器里的唯一实例，同时是本舰队的根）
+//
+// 对外契约与旧 kb-sync 完全一致（插件只认这些端点），唯一变化是内部执行模型：
+//   旧：/ingest 与 /run 把 uuid 投进队列，队列消费者同步跑完整流程（含最长 600 秒轮询）。
+//   新：/ingest 与 /run 用 createBatch 创建 Workflow 实例；实例号 = uuid-版本，
+//       同版本重复触发由平台静默去重，因此不再需要 KV 锁。
+//
+// 本实例自带 cron（它是自己舰队的根）。celld 的限制是「cron 只有根会触发」，
+// 旧架构为此专门做了中央 scheduler；拆成独立容器后这一跳没有存在必要了。
+import type { Env } from "./env";
+import {
+  collectWork,
+  instanceId,
+  listPendingApproval,
+  type WorkItem,
+} from "./workflows/collect";
+import {
+  clearApproved,
+  delLedger,
+  delMd,
+  delMeta,
+  delRaw,
+  getLedger,
+  isApproved,
+  listMd,
+  listMetas,
+  loadMd,
+  putLedger,
+  putMeta,
+  saveRaw,
+  setApproved,
+  type SessionMeta,
+} from "./lib/store";
+import { deleteKnowledge } from "./lib/weknora";
+import type { RawSession } from "./lib/md";
+import { SessionSyncFlow } from "./workflows/session-sync";
+
+// celld 要求 Workflow 类必须由 worker 模块导出，否则节点启动即失败：
+// 「workflow class SessionSyncFlow is not exported by the Worker module」
+export { SessionSyncFlow };
+
+function authorized(request: Request, env: Env): boolean {
+  const token =
+    request.headers.get("x-ingest-token") || new URL(request.url).searchParams.get("token") || "";
+  return !!env.INGEST_TOKEN && token === env.INGEST_TOKEN;
+}
+
+/** 每轮最多创建几个实例。用户定的保守值是 2（≈旧 max_concurrency=2 的吞吐）。 */
+function concurrency(env: Env): number {
+  const n = Number.parseInt(env.SYNC_CONCURRENCY ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 2;
+}
+
+/** 用 createBatch 建实例：平台对「已存在的实例号」是静默跳过，所以这里天然是去重语义。 */
+async function startSessions(env: Env, items: WorkItem[]) {
+  const batch = items.slice(0, concurrency(env)).map((it) => {
+    const wf = instanceId(it.uuid, it.updated_at);
+    return { id: wf, params: { uuid: it.uuid, wf } };
+  });
+  if (!batch.length) return { started: [] as string[], deduped: 0 };
+  const created = await env.SYNC_FLOW.createBatch(batch);
+  return { started: created.map((i) => i.id), deduped: batch.length - created.length };
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/health") {
+      return Response.json({
+        ok: true,
+        service: "celld-agent-to-rag",
+        model: "Workflow 实例（等待期休眠，不占 isolate）",
+        storage: "KV台账+R2文件",
+        concurrency: concurrency(env),
+      });
+    }
+    if (!authorized(request, env)) {
+      return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
+    }
+
+    // 摄取：插件推送变更会话（含附件 base64）
+    if (url.pathname === "/ingest" && request.method === "POST") {
+      const raw = (await request.json()) as RawSession;
+      if (!raw.uuid || !raw.messages?.length) {
+        return Response.json({ ok: false, error: "bad payload" }, { status: 400 });
+      }
+      await saveRaw(env.FILES, raw.uuid, raw);
+      await putMeta(env.STATE, {
+        uuid: raw.uuid,
+        conversation_id: raw.conversation_id,
+        title: raw.title || "",
+        platform: raw.platform || "",
+        updated_at: raw.updated_at,
+        pushed_at: new Date().toISOString(),
+      });
+      const ledger = await getLedger(env.STATE, raw.uuid);
+      // 审批闸门：未审批过的新会话只存不处理；已审批/已有台账的变更自动重推
+      if (!ledger && !(await isApproved(env.STATE, raw.uuid))) {
+        return Response.json({ ok: true, pending_approval: true });
+      }
+      const dup =
+        ledger !== null &&
+        ledger.updated_at === raw.updated_at &&
+        ledger.parse_status === "completed";
+      if (dup) return Response.json({ ok: true, queued: false, skipped: true });
+      const r = await startSessions(env, [{ uuid: raw.uuid, updated_at: raw.updated_at }]);
+      return Response.json({ ok: true, queued: r.started.length > 0, deduped: r.deduped > 0 });
+    }
+
+    // 镜像清单：插件据此对齐文件夹
+    if (url.pathname === "/files" && request.method === "GET") {
+      return Response.json({ ok: true, files: await listMd(env.FILES) });
+    }
+    const fileMatch = url.pathname.match(/^\/files\/(.+)$/);
+    if (fileMatch && request.method === "GET") {
+      const name = decodeURIComponent(fileMatch[1] ?? "");
+      const text = await loadMd(env.FILES, name);
+      return text == null ? new Response("not found", { status: 404 }) : new Response(text);
+    }
+
+    // 下架：文件夹文件被用户删除时由插件调用
+    if (fileMatch && request.method === "DELETE") {
+      const name = decodeURIComponent(fileMatch[1] ?? "");
+      let hit: string | null = null;
+      for (const m of await listMetas(env.STATE)) {
+        const l = await getLedger(env.STATE, m.uuid);
+        if (l && l.md === name) {
+          hit = m.uuid;
+          break;
+        }
+      }
+      if (!hit) return Response.json({ ok: false, error: "no ledger for file" }, { status: 404 });
+      const ledger = await getLedger(env.STATE, hit);
+      if (ledger?.knowledge_id) {
+        try {
+          await deleteKnowledge(env, ledger.knowledge_id);
+        } catch {
+          /* 上游删除失败不阻断本地台账清理 */
+        }
+      }
+      await delMd(env.FILES, name);
+      await delLedger(env.STATE, hit);
+      await clearApproved(env.STATE, hit); // 下架即撤销审批：定时对账不得复活
+      return Response.json({ ok: true, retracted: hit });
+    }
+
+    if (url.pathname === "/approve" && request.method === "POST") {
+      const body = (await request.json()) as { uuid?: string };
+      if (!body.uuid) return Response.json({ ok: false, error: "uuid required" }, { status: 400 });
+      await setApproved(env.STATE, body.uuid);
+      const meta = (await listMetas(env.STATE)).find((m) => m.uuid === body.uuid);
+      const r = await startSessions(env, [
+        { uuid: body.uuid, updated_at: meta?.updated_at ?? "" },
+      ]);
+      return Response.json({
+        ok: true,
+        approved: body.uuid,
+        queued: r.started.length > 0,
+        deduped: r.deduped > 0,
+      });
+    }
+    if (url.pathname === "/set-approved" && request.method === "POST") {
+      const body = (await request.json()) as { uuids?: string[] };
+      for (const u of body.uuids || []) await setApproved(env.STATE, u);
+      return Response.json({ ok: true, marked: (body.uuids || []).length });
+    }
+    if (url.pathname === "/purge" && request.method === "POST") {
+      const body = (await request.json()) as { uuid?: string };
+      if (!body.uuid) return Response.json({ ok: false }, { status: 400 });
+      const l = await getLedger(env.STATE, body.uuid);
+      if (l?.knowledge_id) {
+        try {
+          await deleteKnowledge(env, l.knowledge_id);
+        } catch {
+          /* 同上 */
+        }
+      }
+      if (l?.md) await delMd(env.FILES, l.md);
+      await delLedger(env.STATE, body.uuid);
+      await clearApproved(env.STATE, body.uuid);
+      await delMeta(env.STATE, body.uuid);
+      await delRaw(env.FILES, body.uuid);
+      return Response.json({ ok: true, purged: body.uuid });
+    }
+    if (url.pathname === "/pending" && request.method === "GET") {
+      const pending: SessionMeta[] = await listPendingApproval(env);
+      return Response.json({ ok: true, pending });
+    }
+
+    // 手动对账一轮：找出落后项并建实例（受 concurrency 限制）
+    if (url.pathname === "/run" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { limit?: number };
+      const result = await collectWork(env, body.limit ?? undefined);
+      const r = await startSessions(env, result.items);
+      return Response.json({
+        ok: true,
+        kb: result.kb,
+        found: result.items.length,
+        started: r.started,
+        deduped: r.deduped,
+      });
+    }
+
+    // 查进度（Workflow 形态新增：旧队列形态只能看到最终台账）
+    if (url.pathname === "/status" && request.method === "GET") {
+      const uuid = url.searchParams.get("uuid") ?? "";
+      if (!uuid) return Response.json({ ok: false, error: "uuid required" }, { status: 400 });
+      // 实例号优先取台账；处理中时台账还没写 wf，就用 meta 的版本号推出实例号——
+      // 「查进度」恰恰在处理中最有用，只依赖台账会让它在这段时间查不到东西。
+      const ledger = await getLedger(env.STATE, uuid);
+      let wf = ledger?.wf;
+      if (!wf) {
+        const meta = (await listMetas(env.STATE)).find((m) => m.uuid === uuid);
+        if (meta) wf = instanceId(meta.uuid, meta.updated_at);
+      }
+      if (!wf) {
+        return Response.json({ ok: true, uuid, instance: null, note: "无 meta 也无台账：该会话从未被处理" });
+      }
+      try {
+        const instance = await env.SYNC_FLOW.get(wf);
+        return Response.json({ ok: true, uuid, instance: wf, ledger, status: await instance.status() });
+      } catch (e) {
+        return Response.json(
+          { ok: false, error: String(e).slice(0, 200), instance: wf },
+          { status: 404 },
+        );
+      }
+    }
+
+    return new Response("not found", { status: 404 });
+  },
+
+  // 本实例是自己舰队的根，cron 直接生效（旧架构要靠中央 scheduler 中转）
+  async scheduled(controller: unknown, env: Env): Promise<void> {
+    const result = await collectWork(env);
+    const r = await startSessions(env, result.items);
+    console.log(
+      "[agent-to-rag] scheduled",
+      JSON.stringify({
+        cron: (controller as { cron?: string })?.cron,
+        found: result.items.length,
+        started: r.started.length,
+        deduped: r.deduped,
+      }),
+    );
+  },
+};

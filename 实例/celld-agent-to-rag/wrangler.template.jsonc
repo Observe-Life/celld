@@ -1,0 +1,22 @@
+{
+  "name": "celld-agent-to-rag",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "triggers": { "crons": ["37 * * * *"] },
+  "workflows": [
+    { "binding": "SYNC_FLOW", "name": "session-sync", "class_name": "SessionSyncFlow" }
+  ],
+  "kv_namespaces": [{ "binding": "STATE", "id": "sync-state" }],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "sync-files" }],
+  "vars": {
+    "WEKNORA_URL": "http://weknora-lite:8080",
+    "WEKNORA_KEY": "@WEKNORA_KEY@",
+    "GEMINI_KEY": "@GEMINI_KEY@",
+    "SHAPI_KEY": "@SHAPI_KEY@",
+    "JBB_KEY": "@JBB_KEY@",
+    "SKIP_GEMINI": "0",
+    "INGEST_TOKEN": "@INGEST_TOKEN@",
+    "SYNC_ALLOWLIST": "@SYNC_ALLOWLIST@",
+    "SYNC_CONCURRENCY": "2"
+  }
+}

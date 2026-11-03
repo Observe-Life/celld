@@ -28,7 +28,7 @@ fi
 # =====================================================================
 
 ./multimedia/deploy.sh
-./kb-sync/deploy.sh "$ALLOWLIST"
+# kb-sync 已拆分为独立容器 celld-agent-to-rag（见 实例/celld-agent-to-rag/），本套件不再部署它
 ./scheduler/deploy.sh
 # celld 只在根指针变化时重走闭包；组件单独更新需重启节点生效（20秒，状态在桶里无损）
 docker restart celld >/dev/null && echo "node restarted to load new components"
