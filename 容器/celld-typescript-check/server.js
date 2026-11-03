@@ -12,7 +12,7 @@ function lib(name) {
   if (LIBS.has(name)) return LIBS.get(name);
   for (const cand of [name, name + ".d.ts", "lib." + name, "lib." + name + ".d.ts"]) {
     const p = path.join(LIBDIR, cand);
-    if (fs.existsSync(p)) { const t = fs.readFileSync(p, "utf8"); LIBS.set(name, t); return t; }
+    if (fs.existsSync(p)) { const t = fs.readFileSync(p, "utf8"); LIBS.set(cand, t); return t; }
   }
   return undefined;
 }
