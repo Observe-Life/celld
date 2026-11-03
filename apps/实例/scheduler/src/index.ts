@@ -15,10 +15,11 @@ export default {
       return Response.json({ ok: true, service: "scheduler", schedules: Object.keys(SCHEDULES) });
     }
     // 前门转发：/kb/* 与 /mm/* 直达对应 worker（scheduler 是常驻根/入口）
-    if (url.pathname.startsWith("/kb") || url.pathname.startsWith("/mm")) {
+    if (url.pathname.startsWith("/kb") || url.pathname.startsWith("/mm") || url.pathname.startsWith("/tc")) {
       const isKb = url.pathname.startsWith("/kb");
+      const isTc = url.pathname.startsWith("/tc");
       const target = isKb ? env.KBSYNC : env.MM;
-      const inner = new Request(request.url.replace(isKb ? "/kb" : "/mm", ""), {
+      const inner = new Request(request.url.replace(isKb ? "/kb" : isTc ? "/tc" : "/mm", ""), {
         method: request.method,
         headers: request.headers,
         body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,

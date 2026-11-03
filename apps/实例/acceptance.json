@@ -31,14 +31,16 @@
     },
     "services": [
       "MM",
-      "SCHEDULER"
+      "SCHEDULER",
+      "TSC"
     ],
     "d1": false,
     "do": false,
     "workflows": false,
     "containers": false,
     "worker_loaders": false,
-    "assets": false
+    "assets": false,
+    "ts_check": true
   },
   "external_probes": [
     {
@@ -69,5 +71,9 @@
   "config_generated": "kb-sync/wrangler.jsonc",
   "config_injected_keys": [
     "SYNC_ALLOWLIST"
+  ],
+  "typecheck_dirs": [
+    "kb-sync",
+    "ts-check"
   ]
 }

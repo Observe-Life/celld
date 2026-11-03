@@ -19,13 +19,16 @@ if [ "$SKIP" = "1" ]; then
 else
   [ -f acceptance.json ] || { echo "[gates] FAIL: 缺少 acceptance.json（实例声明文件）"; exit 1; }
   bash "$GATES/preflight.sh" "$(pwd)/acceptance.json" || { echo "[gates] L0 预检失败，拒绝部署"; exit 1; }
-  bash "$GATES/typecheck.sh" "$(pwd)/kb-sync" || { echo "[gates] L1 类型检查失败，拒绝部署"; exit 1; }
+  for d in kb-sync ts-check; do
+    bash "$GATES/typecheck.sh" "$(pwd)/$d" || { echo "[gates] L1 类型检查失败（$d），拒绝部署"; exit 1; }
+  done
   echo "[gates] L0+L1 通过"
 fi
 # =====================================================================
 
 ./multimedia/deploy.sh
 ./kb-sync/deploy.sh "$ALLOWLIST"
+./ts-check/deploy.sh
 ./scheduler/deploy.sh
 # celld 只在根指针变化时重走闭包；组件单独更新需重启节点生效（20秒，状态在桶里无损）
 docker restart celld >/dev/null && echo "node restarted to load new components"

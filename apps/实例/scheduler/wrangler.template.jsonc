@@ -5,7 +5,8 @@
   "triggers": { "crons": ["37 * * * *"] },
   "services": [
     { "binding": "KBSYNC", "service": "kb-sync" },
-    { "binding": "MM", "service": "multimedia-pipeline" }
+    { "binding": "MM", "service": "multimedia-pipeline" },
+    { "binding": "TSC", "service": "ts-check" }
   ],
   "vars": {}
 }
