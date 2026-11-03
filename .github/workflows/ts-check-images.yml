@@ -1,6 +1,49 @@
 name: ts-check images
 
-on: 
+on:
   push:
-    paths: ["用-check"images"
-    
+    paths: ["容器/**", ".github/workflows/ts-check-images.yml"]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: celld-typescript-check
+            context: 容器/celld-typescript-check
+          - name: celld-wake-container
+            context: 容器/celld-wake-container
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: ghcr.io/observe-life/${{ matrix.name }}:latest
+
+  selftest:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉起类型检查服务并自测（已知类型错误必须被检出）
+        run: |
+          docker run -d --name tsc -p 8080:8080 ghcr.io/observe-life/celld-typescript-check:latest
+          for i in $(seq 1 30); do curl -sf http://localhost:8080/health && break; sleep 1; done
+          RES=$(curl -s -X POST -H 'content-type: application/json'             -d '{"files":{"src/demo.ts":"const x: number = \"这是一个字符串，类型标错了\";"}}'             http://localhost:8080/check)
+          echo "$RES" | head -c 400
+          E=$(echo "$RES" | jq '.errors')
+          if [ "$E" -lt 1 ]; then echo "自测失败：类型错误未被检出"; exit 1; fi
+          echo "自测通过：类型错误被检出 ($E)"
