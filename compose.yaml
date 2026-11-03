@@ -51,7 +51,7 @@ services:
       # 防复发：启用 epoch GC（保留 7 天），失败启动/旧 epoch 不再无限堆积
       CELLD_LTX_RETENTION_SECS: "604800"
     volumes:
-      - /vol1/docker/celld/state:/var/lib/celld
+      - /vol1/docker/celld/data:/var/lib/celld
     command:
       - --listen
       - 0.0.0.0:8080

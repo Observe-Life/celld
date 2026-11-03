@@ -1,6 +1,6 @@
 {
   "instance": "kb-sync",
-  "dir": "/vol1/docker/celld/apps/实例",
+  "dir": "/vol1/docker/celld/实例",
   "config": "kb-sync/wrangler.template.jsonc",
   "secrets": "kb-sync/secrets.json",
   "modules": {
