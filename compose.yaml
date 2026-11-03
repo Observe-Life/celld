@@ -73,6 +73,7 @@ services:
     profiles: ["standby"]
     restart: "no"
     mem_limit: 512m
+    stop_grace_period: 3s
     networks: [backend]
 
   celld-wake-container:
@@ -84,6 +85,8 @@ services:
       CELLD_WAKE_IDLE_SECS: "${CELLD_WAKE_IDLE_SECS:-600}"
       CELLD_WAKE_START_TIMEOUT: "${CELLD_WAKE_START_TIMEOUT:-40}"
       CELLD_WAKE_FORWARD_TIMEOUT: "${CELLD_WAKE_FORWARD_TIMEOUT:-180}"
+    ports:
+      - "127.0.0.1:8081:8081"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [backend]

@@ -132,6 +132,17 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// 优雅退出：celld-wake-container 空闲回收时发 SIGTERM。node 作为容器 PID 1 会丢弃
+// 未注册 handler 的 SIGTERM，导致 stop 白等 10 秒宽限期后被 SIGKILL（退出码 137，
+// 在 NAS 面板上显示成「错误退出」，实为正常回收）。注册后 1 秒内干净退出、码为 0。
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  process.on(sig, () => {
+    console.log("[celld-typescript-check] " + sig + ", shutting down");
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  });
+}
+
 server.listen(8080, () => {
   console.log("[celld-typescript-check] listening :8080 (typescript " + ts.version + ")");
 });
