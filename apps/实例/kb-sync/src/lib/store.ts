@@ -2,12 +2,12 @@
 export interface LedgerEntry {
   conv: string;
   md: string;
-  knowledge_id?: string;
-  updated_at?: string;
-  parse_status?: string;
-  content_hash?: string;
-  error?: string;
-  synced_at?: string;
+  knowledge_id?: string | undefined;
+  updated_at?: string | undefined;
+  parse_status?: string | undefined;
+  content_hash?: string | undefined;
+  error?: string | undefined;
+  synced_at?: string | undefined;
 }
 
 export interface SessionMeta {
@@ -37,15 +37,18 @@ export async function putMeta(kv: KVNamespace, m: SessionMeta): Promise<void> {
 }
 export async function listMetas(kv: KVNamespace): Promise<SessionMeta[]> {
   const out: SessionMeta[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await kv.list({ prefix: "session:", cursor });
+  let cursor: string | null = null;
+  while (true) {
+    const opts: KVNamespaceListOptions = { prefix: "session:" };
+    if (cursor) opts.cursor = cursor;
+    const page = await kv.list(opts);
     for (const key of page.keys) {
       const v = await kv.get(key.name);
       if (v) out.push(JSON.parse(v) as SessionMeta);
     }
-    cursor = page.list_complete ? undefined : page.cursor;
-  } while (cursor);
+    if (page.list_complete) break;
+    cursor = page.cursor ?? null;
+  }
   return out;
 }
 
@@ -68,12 +71,13 @@ export async function delMd(r2: R2Bucket, name: string): Promise<void> {
 }
 export async function listMd(r2: R2Bucket): Promise<string[]> {
   const out: string[] = [];
-  let cursor: string | undefined;
-  do {
-    const page = await r2.list({ prefix: "md/", cursor });
+  let cursor = "";
+  while (true) {
+    const page = await r2.list({ prefix: "md/", ...(cursor ? { cursor } : {}) });
     for (const o of page.objects) out.push(o.key.slice(3));
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
+    if (!page.truncated) break;
+    cursor = page.cursor ?? "";
+  }
   return out;
 }
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {

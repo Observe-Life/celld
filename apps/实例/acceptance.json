@@ -1,0 +1,73 @@
+{
+  "instance": "kb-sync",
+  "dir": "/vol1/docker/celld/apps/实例",
+  "config": "kb-sync/wrangler.template.jsonc",
+  "secrets": "kb-sync/secrets.json",
+  "modules": {
+    "worker": true,
+    "cron": {
+      "root": true,
+      "expressions": [
+        "37 * * * *"
+      ]
+    },
+    "queues": {
+      "producer": "QUEUE",
+      "queue": "kb-conv-sync",
+      "dlq": "kb-conv-sync-dlq",
+      "max_concurrency": 2,
+      "send_batch_limit": 100,
+      "message_max_kb": 128
+    },
+    "kv": {
+      "binding": "STATE",
+      "namespace": "sync-state",
+      "ttl_min_seconds": 60
+    },
+    "r2": {
+      "binding": "FILES",
+      "bucket": "sync-files",
+      "backend": "s3://celld-fleet"
+    },
+    "services": [
+      "MM",
+      "SCHEDULER"
+    ],
+    "d1": false,
+    "do": false,
+    "workflows": false,
+    "containers": false,
+    "worker_loaders": false,
+    "assets": false
+  },
+  "external_probes": [
+    {
+      "name": "jbb",
+      "base_url": "https://cn.jbbt.cc/v1",
+      "checks": [
+        "models_reachable",
+        "small_completion",
+        "mime_matrix",
+        "--full:body_size",
+        "--full:token_limit"
+      ]
+    },
+    {
+      "name": "weknora",
+      "base_url": "http://weknora-lite:8080",
+      "checks": [
+        "health",
+        "list_shape",
+        "state_machine"
+      ]
+    }
+  ],
+  "typecheck": {
+    "enabled": true,
+    "image": "node:22-alpine"
+  },
+  "config_generated": "kb-sync/wrangler.jsonc",
+  "config_injected_keys": [
+    "SYNC_ALLOWLIST"
+  ]
+}

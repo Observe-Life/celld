@@ -47,7 +47,9 @@ export async function transcribeImages(env: Env, images: Array<{ mime: string; b
   const pending: number[] = [];
   const keys: string[] = [];
   for (let i = 0; i < images.length; i += 1) {
-    const key = "tx:" + (await sha256HexStr(images[i].b64));
+    const img = images[i];
+    if (!img) continue;
+    const key = "tx:" + (await sha256HexStr(img.b64));
     keys.push(key);
     const hit = await env.STATE.get(key);
     if (hit != null) out[i] = hit;
@@ -59,17 +61,22 @@ export async function transcribeImages(env: Env, images: Array<{ mime: string; b
     const group = pending.slice(start, start + BATCH);
     const parts: Array<Record<string, unknown>> = [{ type: "text", text: VISION_PROMPT }];
     group.forEach((idx, n) => {
+      const img = images[idx];
+      if (!img) return;
       parts.push({ type: "text", text: `[[${n + 1}]]` });
-      parts.push({ type: "image_url", image_url: { url: `data:${images[idx].mime};base64,${images[idx].b64}` } });
+      parts.push({ type: "image_url", image_url: { url: `data:${img.mime};base64,${img.b64}` } });
     });
     parts.push({ type: "text", text: "结束" });
     const answer = await callLlm(env, { model: MODEL, temperature: 0, messages: [{ role: "user", content: parts }] });
     for (let n = 0; n < group.length; n += 1) {
-      const seg = answer.split(`[[${n + 1}]]`);
-      const value = seg.length > 1 ? seg[1].split("[[")[0].trim() : "";
-      if (!value) throw new Error(`VISION_EMPTY: 批次${start / BATCH + 1}第${n + 1}张无转写结果`);
-      out[group[n]] = value;
-      await env.STATE.put(keys[group[n]], value); // 回写缓存
+      const idx = group[n];
+      if (idx === undefined) continue;
+      const seg = answer.split(`[[${n + 1}]]`)[1] ?? "";
+      const value = seg.split("[[")[0]?.trim() ?? "";
+      if (!value) throw new Error(`VISION_EMPTY: 批次${Math.floor(start / BATCH) + 1}第${n + 1}张无转写结果`);
+      out[idx] = value;
+      const cacheKey = keys[idx];
+      if (cacheKey) await env.STATE.put(cacheKey, value); // 回写缓存
     }
   }
   return out;

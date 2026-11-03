@@ -29,9 +29,9 @@ export default {
       const ledger = await getLedger(env.STATE, raw.uuid);
       // 审批闸门：未审批过的新会话只存不处理；已审批/已有台账的变更自动重推
       if (!ledger && !(await isApproved(env.STATE, raw.uuid))) return Response.json({ ok: true, pending_approval: true });
-      const dup = ledger.updated_at === raw.updated_at && ledger.parse_status === "completed";
+      const dup = ledger !== null && ledger.updated_at === raw.updated_at && ledger.parse_status === "completed";
       if (!dup) await env.QUEUE.send({ uuid: raw.uuid });
-      return Response.json({ ok: true, queued: !dup, skipped: !!dup });
+      return Response.json({ ok: true, queued: !dup, skipped: dup });
     }
 
     // 镜像清单：插件据此对齐文件夹
@@ -41,13 +41,13 @@ export default {
     }
     const fileMatch = url.pathname.match(/^\/files\/(.+)$/);
     if (fileMatch && request.method === "GET") {
-      const name = decodeURIComponent(fileMatch[1]);
+      const name = decodeURIComponent(fileMatch[1] ?? "");
       const text = await loadMd(env.FILES, name);
       return text == null ? new Response("not found", { status: 404 }) : new Response(text);
     }
     // 下架：文件夹文件被用户删除时由插件调用
     if (fileMatch && request.method === "DELETE") {
-      const name = decodeURIComponent(fileMatch[1]);
+      const name = decodeURIComponent(fileMatch[1] ?? "");
       const metas = await listPendingApproval(env); // 复用遍历：找该 md 对应 uuid
       void metas;
       const { listMetas } = await import("./lib/store");

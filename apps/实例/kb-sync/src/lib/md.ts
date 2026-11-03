@@ -65,9 +65,9 @@ export async function buildConversationMd(env: Env, raw: RawSession): Promise<st
   head.push("");
 
   for (const message of raw.messages) {
-    const roleKnown = message.role === "user" || message.role === "bot" || message.role === "assistant";
-    if (!roleKnown) continue;
-    const role = message.role === "assistant" ? "bot" : message.role;
+    const rawRole = message.role;
+    if (rawRole !== "user" && rawRole !== "assistant" && rawRole !== "bot") continue;
+    const role: "bot" | "user" = rawRole === "assistant" ? "bot" : rawRole;
     const speaker = role === "user" ? "我（用户）" : "智能体";
     const lines = await partsToLines(env, role, speaker, message.parts ?? [], raw.attachments ?? {});
     if (!lines.length) continue;
@@ -101,7 +101,7 @@ async function partsToLines(
       filenames.push(part.filename || "未知文件名");
     } else if (part.type === "record") {
       // 2026-11-03：语音不再转写，与文件一样只列名（附件本身已随会话保存）
-      filenames.push(part.filename || "语音文件");
+      filenames.push(part.filename ?? "语音文件");
     }
   }
 
@@ -124,7 +124,7 @@ function resolveAsset(part: RawPart, attachments: Record<string, { mime: string;
   if (part.b64) return { mime: part.mime || "application/octet-stream", b64: part.b64 };
   if (part.image_url?.url?.startsWith("data:")) {
     const m = part.image_url.url.match(/^data:([^;]+);base64,(.+)$/);
-    if (m) return { mime: m[1], b64: m[2] };
+    if (m) return { mime: m[1] ?? "image/png", b64: m[2] ?? "" };
   }
   return null;
 }
