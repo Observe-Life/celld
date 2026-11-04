@@ -19,7 +19,7 @@ python3 - <<PYEOF
 import json
 tpl = open("wrangler.template.jsonc").read()
 sec = json.load(open("secrets.json"))
-tpl = tpl.replace("@WEKNORA_KEY@", sec["WEKNORA_KEY"])
+tpl = tpl.replace("@RAGF_KEY@", sec["RAGF_KEY"])
 tpl = tpl.replace("@GEMINI_KEY@", sec.get("GEMINI_KEY", ""))
 open("wrangler.jsonc", "w").write(tpl)
 PYEOF

@@ -5,8 +5,8 @@ export interface Env {
   STATE: KVNamespace;
   FILES: R2Bucket;
   SYNC_FLOW: Workflow;
-  WEKNORA_URL: string;
-  WEKNORA_KEY: string;
+  RAGF_URL: string;
+  RAGF_KEY: string;
   JBB_KEY: string;
   GEMINI_KEY: string;
   SHAPI_KEY: string;

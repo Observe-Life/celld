@@ -44,17 +44,25 @@ function textOf(message: RawSession["messages"][number]): string {
 }
 
 /** 从一份会话构造时间轴条目（每条消息一项，跳过无正文与无时间且无兜底的项）。 */
-export function entriesFromSession(raw: RawSession, knowledgeId: string, kbId: string): TimelineEntry[] {
+/** 素材系统标识。rag-ferrite 是单库、没有知识库这一层，但 D1 的 kb_id 列仍在，
+ *  且召回侧从不按它过滤（只在 /health 显示数量），所以这里填常量保留可追溯性：
+ *  能一眼看出这批时间轴条目登记时背后是哪个素材系统。 */
+const SOURCE_SYSTEM = "rag-ferrite";
+
+export function entriesFromSession(raw: RawSession, knowledgeId: string): TimelineEntry[] {
   const fallback = toIso(raw.updated_at, "");
   const items: TimelineEntry[] = [];
   raw.messages.forEach((m, i) => {
+    // 只登记用户说的话：「记忆知识」= 我说过什么、我要过什么。
+    // 助手输出本来就在素材里（经验通道可召回），再进时间轴会用长篇回复污染记忆召回。
+    if (m.role !== "user") return;
     const snippet = textOf(m);
     if (!snippet) return;
     const eventTime = toIso(m.ts, fallback);
     if (!eventTime) return;
     items.push({
       knowledge_id: knowledgeId,
-      kb_id: kbId,
+      kb_id: SOURCE_SYSTEM,
       seq: i,
       source_kind: "conversation",
       channel: raw.platform ?? "",

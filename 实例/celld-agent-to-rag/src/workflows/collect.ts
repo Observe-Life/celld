@@ -2,7 +2,6 @@
 // 与旧版的唯一区别：items 带上 updated_at，因为实例号需要版本（同会话更新要能新建实例）。
 import type { Env } from "../env";
 import { getLedger, isApproved, listMetas, type SessionMeta } from "../lib/store";
-import { findKnowledgeBase } from "../lib/weknora";
 
 export interface WorkItem {
   uuid: string;
@@ -10,16 +9,11 @@ export interface WorkItem {
 }
 
 export interface CollectResult {
-  kb: string | null;
   items: WorkItem[];
 }
 
 export async function collectWork(env: Env, limit?: number): Promise<CollectResult> {
-  const report: CollectResult = { kb: null, items: [] };
-  const kb = await findKnowledgeBase(env);
-  if (!kb) return report;
-  report.kb = kb.id;
-
+  const report: CollectResult = { items: [] };
   for (const meta of await listMetas(env.STATE)) {
     if (!(await isApproved(env.STATE, meta.uuid))) continue; // 未审批（含已下架）永不自愈复活
     const ledger = await getLedger(env.STATE, meta.uuid);

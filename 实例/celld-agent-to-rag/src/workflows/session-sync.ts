@@ -30,12 +30,11 @@ import {
   type LedgerEntry,
 } from "../lib/store";
 import {
-  checkParseOnce,
-  deleteKnowledge,
-  findKnowledgeBase,
-  listKnowledge,
-  uploadKnowledge,
-} from "../lib/weknora";
+  checkStatusOnce,
+  deleteDocument,
+  listDocuments,
+  uploadDocument,
+} from "../lib/ragferrite";
 
 export interface SessionParams {
   uuid: string;
@@ -43,7 +42,7 @@ export interface SessionParams {
   wf: string;
 }
 
-/** 等解析：60 轮 × 10 秒 = 600 秒，与旧 waitParse 的上限保持一致 */
+/** 等解析：60 轮 × 10 秒 = 600 秒。实测 10 篇文档全链路入库约 75 秒，余量充足 */
 const MAX_PARSE_ROUNDS = 60;
 const PARSE_POLL = "10 seconds";
 const MD_LIMIT = 20_000_000;
@@ -52,18 +51,7 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
   async run(event: WorkflowEvent<SessionParams>, step: WorkflowStep) {
     const uuid = event.payload.uuid;
 
-    // 1. 定位知识库
-    const kb = await step.do(
-      "find-kb",
-      { retries: { limit: 2, delay: 2000 } },
-      async () => {
-        const found = await findKnowledgeBase(this.env);
-        if (!found) throw new NonRetryableError("KB_NOT_FOUND");
-        return found.id;
-      },
-    );
-
-    // 2. 读原始会话：只回摘要，raw 本体留在 R2（步骤结果 ≤1MiB）
+    // 1. 读原始会话：只回摘要，raw 本体留在 R2（步骤结果 ≤1MiB）
     const head = await step.do(
       "read-raw",
       { retries: { limit: 1, delay: 2000 } },
@@ -79,7 +67,7 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
       },
     );
 
-    // 3. 转写 + 构建 md + 落 R2 —— 全流程最贵的一步，结果持久化后不再重烧
+    // 2. 转写 + 构建 md + 落 R2 —— 全流程最贵的一步，结果持久化后不再重烧
     const built = await step.do(
       "transcribe-and-save",
       { retries: { limit: 1, delay: 5000 }, timeout: "15 minutes" },
@@ -95,7 +83,7 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
       },
     );
 
-    // 4. 幂等短路：台账已是同哈希且已完成，就不必再上传解析
+    // 3. 幂等短路：台账已是同哈希且已完成，就不必再上传解析
     const needSync = await step.do("deja-vu", async () => {
       const existing = await getLedger(this.env.STATE, uuid);
       return !(
@@ -108,42 +96,39 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
       return { uuid, skipped: "deja-vu", hash: built.hash };
     }
 
-    // 5. 删除该会话的旧文档（副作用，必须可容忍第二次尝试）
+    // 4. 清掉该会话的旧命名文档（会话标题会变，文件名含标题，因此旧名要下架）。
+    //    这是真实需求而非兼容兜底：mdFileName() 把标题写进了文件名。
     await step.do(
       "delete-old-docs",
       { retries: { limit: 1, delay: 2000 } },
       async () => {
-        const list = await listKnowledge(this.env, kb);
+        const docs = await listDocuments(this.env);
         const prefix = "会话-" + uuid + "-";
-        for (const doc of list.filter((k) => k.title.startsWith(prefix))) {
+        for (const d of docs.filter((x) => x.name.startsWith(prefix))) {
           try {
-            await deleteKnowledge(this.env, doc.id);
+            await deleteDocument(this.env, d.name);
           } catch {
-            /* 单篇删除失败不阻断：上传会覆盖同名，台账以新 knowledge_id 为准 */
+            /* 单篇删除失败不阻断：同名重传会被 rag-ferrite 按内容哈希判重 */
           }
         }
         return true;
       },
     );
 
-    // 6. 上传 md，拿 knowledge_id
+    // 5. 上传 md。rag-ferrite 入库是异步入队，只回执 queued、不给 id，
+    //    所以这里不取返回值，后续一律用文件名（head.md）作为素材标识。
     const up = await step.do(
       "upload",
       { retries: { limit: 2, delay: 5000 }, timeout: "5 minutes" },
       async () => {
         const md = await loadMd(this.env.FILES, head.md);
         if (md == null) throw new NonRetryableError("MD_MISSING_AFTER_SAVE");
-        const knowledgeId = await uploadKnowledge(
-          this.env,
-          kb,
-          head.md,
-          new TextEncoder().encode(md),
-        );
-        return { knowledgeId };
+        await uploadDocument(this.env, head.md, md);
+        return { name: head.md };
       },
     );
 
-    // 7. 等解析：短查询步骤 + step.sleep 循环。等待期间实例休眠，不占 isolate。
+    // 6. 等解析：短查询步骤 + step.sleep 循环。等待期间实例休眠，不占 isolate。
     //    步骤名带轮次号，保证重放时每一步都能命中自己的缓存结果。
     let status = "pending";
     let seen = false;
@@ -151,7 +136,7 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
       const probe = await step.do(
         `check-parse-${round}`,
         { retries: { limit: 1, delay: 2000 } },
-        async () => checkParseOnce(this.env, kb, up.knowledgeId, seen),
+        async () => checkStatusOnce(this.env, up.name, seen),
       );
       status = probe.status;
       seen = probe.seen;
@@ -163,7 +148,6 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
     const entry: LedgerEntry = {
       conv: head.conv,
       md: head.md,
-      knowledge_id: up.knowledgeId,
       updated_at: head.updated_at,
       parse_status: status,
       content_hash: built.hash,
@@ -179,7 +163,7 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
       async () => {
         const raw = await loadRaw<RawSession>(this.env.FILES, uuid);
         if (!raw) return { skipped: "raw missing" };
-        const items = entriesFromSession(raw, uuid, kb);
+        const items = entriesFromSession(raw, uuid);
         const r = await pushEntries(this.env, items);
         return { entries: items.length, sent: r.sent, failed: r.failed.length };
       },
@@ -195,6 +179,6 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
     );
 
     if (status !== "completed") throw new NonRetryableError("PARSE_" + status);
-    return { uuid, hash: built.hash, knowledgeId: up.knowledgeId, status };
+    return { uuid, hash: built.hash, name: up.name, status };
   }
 }

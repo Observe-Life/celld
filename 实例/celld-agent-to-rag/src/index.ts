@@ -31,7 +31,7 @@ import {clearApproved,
   type SessionMeta,
   loadRaw,
 } from "./lib/store";
-import { deleteKnowledge, findKnowledgeBase } from "./lib/weknora";
+import { deleteDocument } from "./lib/ragferrite";
 import { entriesFromSession, pushEntries, forgetTimeline } from "./lib/timeline";
 import type { RawSession } from "./lib/md";
 import { SessionSyncFlow } from "./workflows/session-sync";
@@ -154,13 +154,10 @@ export default {
         }
       }
       if (!hit) return Response.json({ ok: false, error: "no ledger for file" }, { status: 404 });
-      const ledger = await getLedger(env.STATE, hit);
-      if (ledger?.knowledge_id) {
-        try {
-          await deleteKnowledge(env, ledger.knowledge_id);
-        } catch {
-          /* 上游删除失败不阻断本地台账清理 */
-        }
+      try {
+        await deleteDocument(env, name);
+      } catch {
+        /* 上游删除失败不阻断本地台账清理 */
       }
       await delMd(env.FILES, name);
       await delLedger(env.STATE, hit);
@@ -192,14 +189,14 @@ export default {
       const body = (await request.json()) as { uuid?: string };
       if (!body.uuid) return Response.json({ ok: false }, { status: 400 });
       const l = await getLedger(env.STATE, body.uuid);
-      if (l?.knowledge_id) {
+      if (l?.md) {
         try {
-          await deleteKnowledge(env, l.knowledge_id);
+          await deleteDocument(env, l.md);
         } catch {
           /* 同上 */
         }
+        await delMd(env.FILES, l.md);
       }
-      if (l?.md) await delMd(env.FILES, l.md);
       await delLedger(env.STATE, body.uuid);
       await clearApproved(env.STATE, body.uuid);
       await delMeta(env.STATE, body.uuid);
@@ -219,7 +216,6 @@ export default {
       const r = await startSessions(env, result.items);
       return Response.json({
         ok: true,
-        kb: result.kb,
         found: result.items.length,
         started: r.started,
         restarted: r.restarted,
@@ -233,7 +229,6 @@ export default {
       const body = (await request.json().catch(() => ({}))) as { from?: number; count?: number };
       const from = Math.max(0, Math.floor(body.from ?? 0));
       const count = Math.min(Math.max(1, Math.floor(body.count ?? 10)), 30);
-      const kb = await findKnowledgeBase(env);
       const metas = (await listMetas(env.STATE)).sort((a, b) => (a.uuid < b.uuid ? -1 : 1));
       const page = metas.slice(from, from + count);
       let entries = 0, sent = 0, docs = 0;
@@ -241,7 +236,7 @@ export default {
       for (const m of page) {
         const raw = await loadRaw<RawSession>(env.FILES, m.uuid);
         if (!raw?.messages?.length) continue;
-        const items = entriesFromSession(raw, m.uuid, kb?.id ?? "");
+        const items = entriesFromSession(raw, m.uuid);
         if (!items.length) continue;
         docs += 1;
         entries += items.length;

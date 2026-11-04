@@ -293,54 +293,61 @@ async function fromTimeline(
   }
 }
 
-/** 经验知识通道：weknora-lite 的混合检索。
+/**
+ * 从素材文件名提取会话 uuid。rag-ferrite 的文件名由 celld 的 mdFileName() 生成为
+ * `会话-<uuid>-<标题>.md`，uuid 就在名字里。
  *
- * 实测约束（2026-11-04）：weknora-lite 的向量段在 19,046 个向量上 60 秒不返回
- * （sqlite-vec 无 KNN 索引，退化为暴力扫描），关键词段 0.058 秒。
- * 所以这里默认 disable_vector_match=true 先保证可用，向量段等 weknora 侧修好后
- * 由 RECALL_CORPUS_VECTOR=1 打开。另外 hybrid-search 只接受 POST + JSON body，
- * GET 会报 "Invalid request parameters / EOF"。
+ * 这是切换附带修好的一个真实缺陷：旧体系里时间轴存会话 uuid、经验通道存 weknora 文档 id，
+ * 两套 id 永不相交，所以「同一 knowledge_id 的多个命中合并」这条设计在跨通道上落不了地。
+ * 现在两边都能归一到会话 uuid。非会话类素材取不到，回退用文件名本身。
+ */
+function uuidFromSourceName(name: string): string | null {
+  const m = /^会话-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})-.+\.md$/.exec(name);
+  // 用可选链而非 m[1] 直取：本实例 tsconfig 开了 noUncheckedIndexedAccess，
+  // 下标访问的类型是 string | undefined，直接返回会撞 TS2322。
+  return m?.[1] ?? null;
+}
+
+/** 经验知识通道：rag-ferrite 的混合检索（BM25 中文切词 + 向量 + RRF + 外接重排）。
+ *
+ * 与旧 weknora 通道的两点实质差别：
+ *   1. 向量段可用了。weknora-lite 的向量查询在 19,046 个向量上 60 秒不返回
+ *      （sqlite-vec 无 KNN 索引，退化为暴力扫描），所以当时被迫带
+ *      disable_vector_match=true 只跑关键词。rag-ferrite 实测 0.17–0.79 秒全链路完成。
+ *   2. 单库。没有知识库这一层，因此不再有 RECALL_KB_IDS 多库循环。
  */
 async function fromCorpus(env: Env, q: string, limit: number): Promise<CpResult> {
-  const kbIds = env.RECALL_KB_IDS.split(",").map((s) => s.trim()).filter(Boolean);
-  if (!kbIds.length) return { hits: [], error: "未配置 RECALL_KB_IDS，经验通道跳过" };
   if (!q) return { hits: [], error: "经验通道需要 q" };
-  const base = env.WEKNORA_URL.replace(/\/$/, "");
-  const useVector = env.RECALL_CORPUS_VECTOR === "1";
+  const base = env.RAGF_URL.replace(/\/$/, "");
   const out: RecallHit[] = [];
-  for (const kb of kbIds) {
-    try {
-      const res = await fetch(`${base}/api/v1/knowledge-bases/${encodeURIComponent(kb)}/hybrid-search`, {
-        method: "POST",
-        headers: { "X-API-Key": env.WEKNORA_KEY, "content-type": "application/json" },
-        body: JSON.stringify({
-          query_text: q,
-          match_count: Math.min(limit, 50),
-          disable_vector_match: !useVector,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        return { hits: out, error: `weknora ${res.status} ${body.slice(0, 120)}` };
-      }
-      const d = (await res.json()) as { data?: Array<Record<string, unknown>> };
-      for (const seg of d.data ?? []) {
-        const kid = String(seg.knowledge_id ?? seg.id ?? "");
-        const text = String(seg.content ?? seg.snippet ?? seg.text ?? "");
-        if (!kid && !text) continue;
-        out.push({
-          source: "corpus",
-          knowledge_id: kid,
-          event_time: undefined,
-          seq: undefined,
-          snippet: text.slice(0, 500),
-          title: seg.knowledge_title == null ? undefined : String(seg.knowledge_title),
-          score: seg.score == null ? undefined : Number(seg.score),
-        });
-      }
-    } catch (e) {
-      return { hits: out, error: String(e).slice(0, 160) };
+  try {
+    const res = await fetch(`${base}/api/query`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RAGF_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({ query: q, limit: Math.min(limit, 50) }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { hits: out, error: `ragferrite ${res.status} ${body.slice(0, 120)}` };
     }
+    const d = (await res.json()) as { results?: Array<Record<string, unknown>> };
+    for (const seg of d.results ?? []) {
+      const name = String(seg.source_name ?? "");
+      const text = String(seg.content ?? "");
+      if (!name && !text) continue;
+      out.push({
+        source: "corpus",
+        // 归一到会话 uuid，与时间轴通道同源；取不到则用文件名兜底
+        knowledge_id: uuidFromSourceName(name) ?? name,
+        event_time: undefined,
+        seq: seg.chunk_index == null ? undefined : Number(seg.chunk_index),
+        snippet: text.slice(0, 500),
+        title: name || undefined,
+        score: seg.score == null ? undefined : Number(seg.score),
+      });
+    }
+  } catch (e) {
+    return { hits: out, error: String(e).slice(0, 160) };
   }
   return { hits: out, error: undefined };
 }
@@ -354,7 +361,7 @@ export default {
         service: "knowledge-recall",
         role: "root",
         channels: ["timeline", "corpus"],
-        kb_ids: env.RECALL_KB_IDS.split(",").filter(Boolean).length,
+        corpus_base: env.RAGF_URL,
       });
     }
 

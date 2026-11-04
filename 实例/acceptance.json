@@ -38,12 +38,12 @@
       ]
     },
     {
-      "name": "weknora",
-      "base_url": "http://weknora-lite:8080",
+      "name": "rag-ferrite",
+      "base_url": "http://rag-ferrite:4242",
       "checks": [
         "health",
         "list_shape",
-        "state_machine"
+        "query_shape"
       ]
     }
   ],

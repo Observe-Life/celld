@@ -1,8 +1,10 @@
 // CF 原生存储层：台账在 KV，会话原始数据与 md 在 R2。不再依赖任何外部通道。
 export interface LedgerEntry {
   conv: string;
+  /** 素材唯一标识 = rag-ferrite 里的文档名，与源文件夹文件名一致。
+   *  旧版另有 knowledge_id 存 weknora 文档 UUID；rag-ferrite 的整数 id 会随重灌变化，
+   *  不能做跨系统标识，因此标识统一落在文件名上，不再另设字段。 */
   md: string;
-  knowledge_id?: string | undefined;
   updated_at?: string | undefined;
   parse_status?: string | undefined;
   content_hash?: string | undefined;

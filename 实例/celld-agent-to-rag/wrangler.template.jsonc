@@ -2,15 +2,15 @@
   "name": "celld-agent-to-rag",
   "main": "src/index.ts",
   "compatibility_date": "2026-01-01",
-  "triggers": { "crons": ["37 * * * *"] },
+  "triggers": { "crons": [] },
   "workflows": [
     { "binding": "SYNC_FLOW", "name": "session-sync", "class_name": "SessionSyncFlow" }
   ],
   "kv_namespaces": [{ "binding": "STATE", "id": "sync-state" }],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "sync-files" }],
   "vars": {
-    "WEKNORA_URL": "http://weknora-lite:8080",
-    "WEKNORA_KEY": "@WEKNORA_KEY@",
+    "RAGF_URL": "http://rag-ferrite:4242",
+    "RAGF_KEY": "@RAGF_KEY@",
     "GEMINI_KEY": "@GEMINI_KEY@",
     "SHAPI_KEY": "@SHAPI_KEY@",
     "JBB_KEY": "@JBB_KEY@",

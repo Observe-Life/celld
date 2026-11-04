@@ -9,19 +9,45 @@
   "config_injected_keys": [],
   "modules": {
     "worker": true,
-    "cron": { "root": true, "expressions": ["17 4 * * *"] },
+    "cron": {
+      "root": true,
+      "expressions": [
+        "17 4 * * *"
+      ]
+    },
     "d1": true,
     "d1_note": "D1 由同容器的 knowledge-timeline-impression 独占写；本实例只通过 service binding 读",
     "workflows": false,
     "queues": false,
     "kv": false,
     "r2": false,
-    "services": ["TIMELINE"],
-    "do": false, "containers": false, "worker_loaders": false, "assets": false
+    "services": [
+      "TIMELINE"
+    ],
+    "do": false,
+    "containers": false,
+    "worker_loaders": false,
+    "assets": false
   },
   "external_probes": [
-    { "name": "weknora", "base_url": "http://weknora-lite:8080", "checks": ["health", "list_shape", "state_machine"] },
-    { "name": "celld-typescript-check", "base_url": "http://celld-wake-container:8081", "standby_container": "celld-typescript-check", "checks": ["health", "check_roundtrip"] }
+    {
+      "name": "rag-ferrite",
+      "base_url": "http://rag-ferrite:4242",
+      "checks": [
+        "health",
+        "list_shape",
+        "query_shape"
+      ]
+    },
+    {
+      "name": "celld-typescript-check",
+      "base_url": "http://celld-wake-container:8081",
+      "standby_container": "celld-typescript-check",
+      "checks": [
+        "health",
+        "check_roundtrip"
+      ]
+    }
   ],
   "typecheck": {
     "enabled": true,
@@ -29,5 +55,7 @@
     "entrypoint": "http://celld-wake-container:8081/check",
     "pass_criteria": "errors==0 且无 lib 缺失指纹码"
   },
-  "typecheck_dirs": ["."]
+  "typecheck_dirs": [
+    "."
+  ]
 }

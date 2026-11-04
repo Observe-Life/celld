@@ -150,7 +150,7 @@ services:
       # mihomo 在 host 网络，backend 网桥内用网关 IP 访问它。
       HTTP_PROXY: "http://172.23.0.1:7890"
       HTTPS_PROXY: "http://172.23.0.1:7890"
-      NO_PROXY: "localhost,127.0.0.1,weknora-lite,minio,celld,celld-agent-to-rag,celld-wake-container,celld-typescript-check,172.23.0.0/16"
+      NO_PROXY: "localhost,127.0.0.1,rag-ferrite,minio,celld,celld-agent-to-rag,celld-wake-container,celld-typescript-check,172.23.0.0/16"
     volumes:
       - /vol1/docker/celld-knowledge-recall/data:/var/lib/celld
     command:
