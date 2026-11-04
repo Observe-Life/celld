@@ -1,0 +1,15 @@
+{
+  "name": "knowledge-recall",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "triggers": { "crons": ["17 4 * * *"] },
+  "services": [
+    { "binding": "TIMELINE", "service": "knowledge-timeline-impression" }
+  ],
+  "vars": {
+    "WEKNORA_URL": "http://weknora-lite:8080",
+    "WEKNORA_KEY": "@WEKNORA_KEY@",
+    "RECALL_KB_IDS": "f8df17b2-b11a-40aa-80b1-2db1c0fd7fa4",
+    "RECALL_CORPUS_VECTOR": "0"
+  }
+}

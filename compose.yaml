@@ -124,6 +124,44 @@ services:
       retries: 3
     networks: [backend]
 
+  # ===== celld-knowledge-recall：知识召回容器（活跃）=====
+  # 独立舰队 = 独立桶 s3://celld-recall；内含两个实例：
+  #   knowledge-recall（根：对外唯一入口 + 全部 cron）
+  #   knowledge-timeline-impression（cohosted：时间轴与画像，D1 唯一写者）
+  celld-knowledge-recall:
+    image: celld-full:latest
+    container_name: celld-knowledge-recall
+    restart: unless-stopped
+    mem_limit: 1g
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      CELLD_BUCKET: "s3://celld-recall"
+      S3_ENDPOINT: "http://minio:9000"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      CELLD_WATCH: "/var/lib/celld/state"
+      # 召回要同步调 weknora 混合检索与 rerank，预算与知识库容器一致
+      CELLD_HANDLER_BUDGET_S: "900"
+      CELLD_LTX_RETENTION_SECS: "604800"
+    volumes:
+      - /vol1/docker/celld-knowledge-recall/data:/var/lib/celld
+    command:
+      - --listen
+      - 0.0.0.0:8080
+      - --internal-listen
+      - 0.0.0.0:8081
+      - --advertise
+      - celld-knowledge-recall:8081
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [backend]
+
 networks:
   backend:
     external: true

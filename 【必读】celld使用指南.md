@@ -58,7 +58,7 @@
 |---|---|---|
 | 1 | **一个容器同一时刻只跑一个“应用根”**：每次 `celld deploy` 都会无条件改写全局指针 `deploy/current.json`，谁最后部署谁当根 | `crates/celld/deploy.rs` L937-946（注释原文：“the fleet-wide one is the sole application selector”；上游英文文档里的 fleet，本框架统一称**容器**） |
 | 2 | **cron 定时只有“根”会触发**；被 service 绑定带进来的 cohosted worker，其 cron 永不触发（只警告不报错） | `crates/celld/generation.rs` L210-228（注释原文：“a node fires only its own deployment's schedule… Deploy the script as a node's own deployment to run its crons”） |
-| 3 | **组件（cohosted worker）单独更新不会自动生效**：节点只在根指针变化时重走依赖闭包；组件指针变了但根没变时，运行中的仍是旧 bundle | 实测复现；`crates/celld/main.rs` `start_pointer_watcher` 以全局指针为触发源 |
+| 3 | **组件（cohosted worker）单独更新不会自动生效**：节点只在**根指针变化**时重走依赖闭包；组件指针变了但根没变时，运行中的仍是旧 bundle。**2026-11-04 修正**：根 worker 自己的更新确实会自动采纳（约 15-25 秒指针轮询），但 cohosted 组件仍需「重部署根且根 bundle 有变化」或重启节点 | 实测：改 cohosted 后等 60 秒未生效，`docker restart` 立即生效；根 vars 改动 15-25 秒生效 |
 | 4 | **队列 sendBatch 单次上限 100 条**，超出直接报错 `QUEUE_ERROR: a batch has at most 100 messages` | `crates/logic/queue.rs` 及运行时校验 |
 
 另有一个上游已知缺陷会放大以上问题：**失败的 DO 启动会泄漏已恢复的 SQLite epoch 并热循环**（celld issue #276）。我们曾因此让一个 cell 攒出 1,566 个 epoch / 258MB 磁盘残骸 + ~600MB 泄漏内存。
@@ -95,7 +95,11 @@ celld-typescript-check（待命容器）+ celld-wake-container（活跃唤醒入
    };
    ```
    加一种定时 = 加一行表达式 + 一行路由，**worker 代码零改动**。cron 最小粒度 1 分钟（与 Cloudflare 相同）；秒级需求走 DO alarms 或队列延时，不要塞进 cron。
-3. **部署即重启**：`deploy.sh` 在部署完所有组件后执行 `docker restart celld`（约 20 秒，状态在桶里，无损），绕开限制 3。
+3. **部署顺序决定是否需要重启**（限制 3 的实操结论）：
+   - 一次部署多个实例时：**先部署 cohosted，最后部署根**。根 bundle 变化会移动全局指针，节点自动重走闭包，组件新版本随之生效——**不需要重启**。
+   - 只改 cohosted、单独部署它时：根指针没动，节点不会重走闭包，**必须重启节点**（或随后重新部署根）。
+   - 只改根时：约 15-25 秒自动采纳，不需要重启。
+   部署脚本因此默认不重启，但会在「本次只部署了 cohosted」时明确提示需要重启。
 
 ### celld-agent-to-rag：会话导入知识库（Workflow 形态）
 
@@ -152,3 +156,27 @@ Cloudflare 账号级平台天然支持“N 个独立 worker 各自部署、各�
 
 ---
 *最后更新：2026-11-03（顶部新增实例/容器/活跃/待命框架与待命容器标准做法；旧版内容就地校正路径与容器拓扑）。改动 celld 部署结构前请先阅读本文并对照源码行号复核（上游版本迭代可能改变行为）。*
+
+## 十二、知识召回体系落地状态（2026-11-04）
+
+已上线（P0–P3）：容器 `celld-knowledge-recall`（桶 `s3://celld-recall`，独立 state），
+实例 `knowledge-recall`（根）+ `knowledge-timeline-impression`（cohosted，D1 唯一写者），
+插件 `astrbot_plugin_knowledge_recall`（零存储）。
+
+实测数据：时间轴 3,858 条 / 覆盖 212 篇素材（与素材数一致）；三通道召回降级列表为空；
+场景配比按规则表自动切换（记忆场景 8/3/3、画像场景 3/8/3、经验场景 2/2/8）。
+
+### 已知缺陷（如实记账，未粉饰）
+
+1. **画像的同键取代实际不生效**：`normalized_key` 目前是「kind + 内容前 24 字」，
+   文字略有不同就是不同键，三条「海鲜过敏」变体会同时 active。真正的近义合并需要 LLM 参与，尚未实现。
+   当前只有调用方显式传入 `normalized_key` 时取代才成立。
+2. **weknora-lite 的向量检索不可用**：19,046 个向量上 60 秒不返回（sqlite-vec 无 KNN 索引，
+   `vector_chunks00` 仅 134 块），关键词段 0.058 秒。因此经验通道默认 `RECALL_CORPUS_VECTOR=0`
+   只走关键词。这同时影响 weknora 自己的问答，属于独立待决事项。
+3. **中文短词必须回退 LIKE**：trigram 需 ≥3 字符，已在数据层实现，不得移除。
+
+### 部署纪律（本次踩出来的）
+
+- 改 cohosted 组件后单独部署它 → 根指针不变 → **节点不会加载新 bundle**（实测等 60 秒无效，重启才生效）。
+- 所以多实例部署必须「先组件、后根」，让根 bundle 变化带动闭包重建。

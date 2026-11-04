@@ -1,0 +1,27 @@
+{
+  "instance": "knowledge-timeline-impression",
+  "container": "celld-knowledge-recall",
+  "container_class": "活跃容器（cohosted 数据 worker）",
+  "dir": "/vol1/docker/celld/实例/knowledge-timeline-impression",
+  "config": "wrangler.template.jsonc",
+  "secrets": "secrets.json",
+  "config_generated": "wrangler.jsonc",
+  "config_injected_keys": [],
+  "modules": {
+    "worker": true,
+    "cron": { "root": false, "expressions": [] },
+    "d1": true,
+    "d1_identity": { "binding": "DB", "database_id": "recall-store", "note": "celld 用 database_id 作身份；写错会静默新建空库，故必须在此声明并由 L0 核对" },
+    "workflows": false,
+    "queues": false,
+    "kv": false,
+    "r2": false,
+    "services": [],
+    "do": false, "containers": false, "worker_loaders": false, "assets": false
+  },
+  "external_probes": [
+    { "name": "celld-typescript-check", "base_url": "http://celld-wake-container:8081", "standby_container": "celld-typescript-check", "checks": ["health", "check_roundtrip"] }
+  ],
+  "typecheck": { "enabled": true, "owner": "celld-typescript-check", "pass_criteria": "errors==0 且无 lib 缺失指纹码" },
+  "typecheck_dirs": ["."]
+}

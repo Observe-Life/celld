@@ -18,6 +18,7 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import type { Env } from "../env";
+import { entriesFromSession, pushEntries } from "../lib/timeline";
 import { buildConversationMd, mdFileName, type RawSession } from "../lib/md";
 import {
   getLedger,
@@ -170,6 +171,20 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
       synced_at: new Date().toISOString(),
       wf: event.payload.wf,
     };
+    // 时间轴登记：增量场景下每轮会话处理完就推一次消息级时间。
+    // 失败不阻断入库（召回是读侧增强，写侧以入库为准），但要在结果里可见。
+    await step.do(
+      "report-timeline",
+      { retries: { limit: 1, delay: 3000 } },
+      async () => {
+        const raw = await loadRaw<RawSession>(this.env.FILES, uuid);
+        if (!raw) return { skipped: "raw missing" };
+        const items = entriesFromSession(raw, uuid, kb);
+        const r = await pushEntries(this.env, items);
+        return { entries: items.length, sent: r.sent, failed: r.failed.length };
+      },
+    );
+
     await step.do(
       "put-ledger",
       { retries: { limit: 2, delay: 2000 } },

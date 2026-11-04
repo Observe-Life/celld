@@ -1,0 +1,13 @@
+{
+  "name": "knowledge-timeline-impression",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "recall-store",
+      "database_id": "recall-store"
+    }
+  ],
+  "vars": {}
+}

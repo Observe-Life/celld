@@ -14,8 +14,7 @@ import {
   listPendingApproval,
   type WorkItem,
 } from "./workflows/collect";
-import {
-  clearApproved,
+import {clearApproved,
   delLedger,
   delMd,
   delMeta,
@@ -30,8 +29,10 @@ import {
   saveRaw,
   setApproved,
   type SessionMeta,
+  loadRaw,
 } from "./lib/store";
-import { deleteKnowledge } from "./lib/weknora";
+import { deleteKnowledge, findKnowledgeBase } from "./lib/weknora";
+import { entriesFromSession, pushEntries, forgetTimeline } from "./lib/timeline";
 import type { RawSession } from "./lib/md";
 import { SessionSyncFlow } from "./workflows/session-sync";
 
@@ -203,7 +204,8 @@ export default {
       await clearApproved(env.STATE, body.uuid);
       await delMeta(env.STATE, body.uuid);
       await delRaw(env.FILES, body.uuid);
-      return Response.json({ ok: true, purged: body.uuid });
+      const tl = await forgetTimeline(env, body.uuid);
+      return Response.json({ ok: true, purged: body.uuid, timeline: tl.ok });
     }
     if (url.pathname === "/pending" && request.method === "GET") {
       const pending: SessionMeta[] = await listPendingApproval(env);
@@ -222,6 +224,35 @@ export default {
         started: r.started,
         restarted: r.restarted,
         deduped: r.deduped,
+      });
+    }
+
+    // 存量回填：把已入库会话的消息级时间推给时间轴。分页跑（每页 count 篇），
+    // 因为 212 篇 × 平均几十条消息会远超单次 handler 预算。
+    if (url.pathname === "/backfill" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { from?: number; count?: number };
+      const from = Math.max(0, Math.floor(body.from ?? 0));
+      const count = Math.min(Math.max(1, Math.floor(body.count ?? 10)), 30);
+      const kb = await findKnowledgeBase(env);
+      const metas = (await listMetas(env.STATE)).sort((a, b) => (a.uuid < b.uuid ? -1 : 1));
+      const page = metas.slice(from, from + count);
+      let entries = 0, sent = 0, docs = 0;
+      const failed: string[] = [];
+      for (const m of page) {
+        const raw = await loadRaw<RawSession>(env.FILES, m.uuid);
+        if (!raw?.messages?.length) continue;
+        const items = entriesFromSession(raw, m.uuid, kb?.id ?? "");
+        if (!items.length) continue;
+        docs += 1;
+        entries += items.length;
+        const r = await pushEntries(env, items);
+        sent += r.sent;
+        for (const f of r.failed) failed.push(`${m.uuid.slice(0, 8)}:${f}`);
+      }
+      return Response.json({
+        ok: failed.length === 0,
+        page: { from, count, docs_total: metas.length, has_more: from + count < metas.length },
+        docs, entries, sent, failed: failed.slice(0, 5),
       });
     }
 
