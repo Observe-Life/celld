@@ -22,6 +22,139 @@ const TIMELINE_BASE = "http://internal";
 
 /** 每通道取多少条。0 表示本轮不用这个通道。 */
 interface Weights { timeline: number; profile: number; corpus: number }
+
+/**
+ * 画像写入的 LLM 归类与取代判定（放在根侧，数据层保持零模型依赖）。
+ * 提示词照 Graphiti 的保守约束：判错取代比放过重复伤害更大。
+ */
+const CLASSIFY_PROMPT = [
+  "你是记忆槽位归类器。给你一条关于用户本人的陈述、可选槽位表、以及同槽位或同类别的现有记忆。",
+  "任务：",
+  "1) 从槽位表选最贴切的 slot（选不出填 \"\")；",
+  "2) 判断新陈述与现有记忆的关系，action 取其一：",
+  '   add=全新事实；noop=与某条现有记忆说的是同一件事（措辞不同也算），给 target_id；',
+  "   update=明确取代某条（现有记忆因新事实不再成立），给 target_id；",
+  "   conflict=与现有矛盾但证据不足以判定谁被取代；reject=敏感槽位但来源是自动推断。",
+  "严格约束：",
+  "- 除非新陈述明确表示「不再/改成/换了/离职/确诊为/更正为」这类变化，否则不得判 update；",
+  "- 不得仅因为新陈述更晚、日期更新、或提到同一实体就判 update；",
+  "- 多值槽位（兴趣、语言、饮食偏好、过敏源列表）通常应判 add 或 noop，不是 update；",
+  "- 但即使是多值槽位，如果新陈述与某条现有记忆【指称同一件事】（只是更详细、更口语、或补了确认来源），必须判 noop 并给 target_id，不得判 add 造成同一事实重复堆积；只有确实是另一个不同对象才判 add；",
+  "- sensitive=1 的槽位，若 origin=extracted，必须返回 reject。",
+  '只输出 JSON：{"slot":"","action":"add","target_id":"","reason":""}',
+].join("\n");
+
+async function fetchJson(env: Env, path: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  // 分支构造：exactOptionalPropertyTypes 下不能给 headers/body 传 undefined
+  const res = body
+    ? await env.TIMELINE.fetch(new Request(`${TIMELINE_BASE}${path}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      }))
+    : await env.TIMELINE.fetch(new Request(`${TIMELINE_BASE}${path}`));
+  return (await res.json()) as Record<string, unknown>;
+}
+
+async function fetchSlots(env: Env): Promise<Array<Record<string, unknown>>> {
+  const res = await env.TIMELINE.fetch(new Request(`${TIMELINE_BASE}/profile/slots`));
+  const d = (await res.json()) as { slots?: Array<Record<string, unknown>> };
+  return d.slots ?? [];
+}
+
+async function fetchCandidates(env: Env, slot: string, kind: string): Promise<Array<Record<string, unknown>>> {
+  const res = await env.TIMELINE.fetch(new Request(
+    `${TIMELINE_BASE}/profile/candidates?slot=${encodeURIComponent(slot)}&kind=${encodeURIComponent(kind)}`));
+  const d = (await res.json()) as { items?: Array<Record<string, unknown>> };
+  return d.items ?? [];
+}
+
+/** 关键词兜底归类：LLM 不可用时也要给出 slot，否则敏感槽位检查会被绕过（实测 503 就发生过）。 */
+const SLOT_HINTS: Array<[RegExp, string]> = [
+  [/过敏|忌口|不能吃/, "health.allergy"],
+  [/确诊|病史|血脂|血压|血糖|用药/, "health.condition"],
+  [/体检|报告/, "health.metrics"],
+  [/离职|入职|跳槽|公司在|就任|兼职/, "work.company"],
+  [/职业是|做.{0,6}(工程师|设计|医生|老师|运营)|岗位/, "identity.role"],
+  [/我叫|称呼我|名字是/, "identity.name"],
+  [/住在|城市|搬到|定居/, "location.city"],
+  [/对.{0,10}感兴趣|喜欢研究|长期关注/, "interest.domain"],
+  [/想买|打算买|计划买/, "interest.plan"],
+  [/想吃|想去|收藏了.*餐厅|收藏了.*地方/, "diet.preference"],
+  [/对象|伴侣|理想型|女朋友|男朋友/, "relation.partner_criteria"],
+  [/分手|恋爱|结婚|离婚|前任/, "emotion.history"],
+  [/家里|父母|孩子|老婆|老公|家人/, "family.background"],
+  [/擅长|精通|会用|熟悉/, "capability.skill"],
+  [/简洁|详细回答|别太长|回复风格/, "preference.answer_style"],
+];
+
+function slotByRule(content: string): string {
+  for (const [re, slot] of SLOT_HINTS) {
+    if (re.test(content)) return slot;
+  }
+  return "";
+}
+
+async function classifyWithLlm(
+  env: Env, content: string, kind: string, origin: string,
+): Promise<{ slot: string; action: string; target_id: string; reason: string; llm: string }> {
+  // 兜底 slot 先算好：LLM 失败时用它，保证敏感槽位检查不失效
+  const ruleSlot = slotByRule(content);
+  const fallback = { slot: ruleSlot, action: "add", target_id: "", reason: `LLM 不可用，按关键词归入 ${ruleSlot || "free-form"}`, llm: "skipped" };
+  if (!env.GEMINI_KEY) return fallback;
+  const slots = await fetchSlots(env);
+  // 关键：必须把现有记忆一起给模型，否则它无从判断「是否同一件事」，
+  // 只会把每条新表述都判成 add（实测 T1 就是这个原因没收敛）。
+  // slot 是模型的输出，所以先用规则猜一个 slot 去取候选，规则没命中就按 kind 取。
+  const guessSlot = slotByRule(content);
+  const cands = await fetchCandidates(env, guessSlot, kind);
+  const candText = cands.length
+    ? cands.map((c) => `- id=${c.id} | slot=${c.slot || "-"} | ${String(c.content).slice(0, 90)}`).join("\n")
+    : "（无同类现有记忆）";
+  const prompt = [
+    CLASSIFY_PROMPT,
+    `\n【新陈述】kind=${kind} origin=${origin} 内容：${content}`,
+    `\n【槽位表】\n${slots.map((x) => `- ${x.slot} | ${x.label} | ${x.cardinality} | sensitive=${x.sensitive} | ${x.description}`).join("\n")}`,
+    `\n【同类现有记忆】${candText}`,
+  ].join("");
+  // 免费档会 429/503 限流（实测出现过），退避重试两次仍失败才降级到规则兜底
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const res = await fetch(`${env.GEMINI_BASE}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${env.GEMINI_KEY}` },
+        body: JSON.stringify({ model: env.GEMINI_MODEL || "gemini-3.1-flash-lite", messages: [{ role: "user", content: prompt }], temperature: 0 }),
+      });
+      if (!res.ok) {
+        lastStatus = res.status;
+        if ((res.status === 429 || res.status === 503) && attempt < 2) {
+          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+          continue;
+        }
+        return { ...fallback, llm: `http${res.status}` };
+      }
+      const d = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const txt = String(d.choices?.[0]?.message?.content ?? "");
+      const m = txt.match(/\{[\s\S]*\}/);
+      if (!m) return { ...fallback, llm: "unparsed" };
+      const j = JSON.parse(m[0]) as Record<string, unknown>;
+      return {
+        slot: String(j.slot ?? "") || ruleSlot,   // LLM 没给出也用规则兜底，敏感检查不失效
+        action: String(j.action ?? "add"),
+        target_id: String(j.target_id ?? ""),
+        reason: String(j.reason ?? "").slice(0, 160),
+        llm: "ok",
+      };
+    } catch (e) {
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      return { ...fallback, llm: `error:${String(e).slice(0, 60)}` };
+    }
+  }
+  return { ...fallback, llm: `http${lastStatus || "exhausted"}` };
+}
+
 const SKIP_TL: TlResult = { hits: [], mode: "skipped", error: undefined };
 const SKIP_PF: PfResult = { resident: [], situational: [], ids: [], pending_count: 0, error: undefined };
 const SKIP_CP: CpResult = { hits: [], error: undefined };
@@ -263,6 +396,74 @@ export default {
         chars: fitted.reduce((a, b) => a + b.text.length, 0),
         text: render(fitted),
       });
+    }
+
+    // 临时探针：验证 workerd 是否走 HTTPS_PROXY 出网（决定 LLM 判定放在哪一侧）
+    if (url.pathname === "/llm/probe") {
+      const key = env.GEMINI_KEY;
+      if (!key) return Response.json({ ok: false, error: "未配置 GEMINI_KEY" }, { status: 400 });
+      const t0 = Date.now();
+      try {
+        const res = await fetch(`${env.GEMINI_BASE}/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+          body: JSON.stringify({
+            model: env.GEMINI_MODEL || "gemini-3.1-flash-lite",
+            messages: [{ role: "user", content: '只输出JSON：{"ok":true,"say":"你好"}' }],
+            temperature: 0,
+          }),
+        });
+        const text = await res.text();
+        return Response.json({ ok: res.ok, status: res.status, ms: Date.now() - t0, body: text.slice(0, 400) });
+      } catch (e) {
+        return Response.json({ ok: false, error: String(e).slice(0, 300), ms: Date.now() - t0 }, { status: 502 });
+      }
+    }
+
+    // 存量回填：给没有槽位的旧条目按关键词规则补 slot（零 LLM，不受限流影响）
+    if (url.pathname === "/profile/backfill-slots" && request.method === "POST") {
+      const list = await fetchJson(env, "/profile/noslot");
+      const items = (list.items ?? []) as Array<Record<string, unknown>>;
+      let assigned = 0;
+      const detail: string[] = [];
+      for (const it of items) {
+        const slot = slotByRule(String(it.content ?? ""));
+        if (!slot) continue;
+        await fetchJson(env, "/profile/set-slot", { id: String(it.id), slot });
+        assigned += 1;
+        detail.push(`${slot} <= ${String(it.content ?? "").slice(0, 24)}`);
+      }
+      return Response.json({ ok: true, scanned: items.length, assigned, detail: detail.slice(0, 12) });
+    }
+
+    // 整理（含确定性合并）
+    if (url.pathname === "/profile/consolidate" && request.method === "POST") {
+      return Response.json(await fetchJson(env, "/profile/consolidate", {}));
+    }
+
+    // 画像写入：根侧先用 LLM 归类槽位并判定关系，再交给数据层执行
+    if (url.pathname === "/profile/remember" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const content = String(body.content ?? "");
+      const kind = String(body.kind ?? "preference");
+      const origin = String(body.origin ?? "explicit");
+      if (!content.trim()) return Response.json({ ok: false, error: "content 必填" }, { status: 400 });
+
+      const c = await classifyWithLlm(env, content, kind, origin);
+      if (c.action === "reject") {
+        return Response.json({ ok: false, error: c.reason || "敏感槽位禁止自动推断写入", llm: c }, { status: 403 });
+      }
+      if (c.action === "noop" && c.target_id) {
+        await fetchJson(env, "/profile/touch", { ids: [c.target_id] });
+        return Response.json({ ok: true, deduped: true, id: c.target_id, slot: c.slot, llm: c });
+      }
+      const putBody: Record<string, unknown> = { kind, content, origin, slot: c.slot, scope: body.scope ?? "global" };
+      if (body.importance != null) putBody.importance = body.importance;
+      if (body.source_ref != null) putBody.source_ref = body.source_ref;
+      if (body.valid_from != null) putBody.valid_from = body.valid_from;
+      // update 与 add 都交给数据层：数据层按槽位 cardinality 决定是否关旧记录有效期
+      const r = await fetchJson(env, "/profile/put", putBody);
+      return Response.json({ ok: true, ...r, action: c.action, llm: c });
     }
 
     // 显式转发给 cohosted 数据 worker：celld 里外部请求只进根，

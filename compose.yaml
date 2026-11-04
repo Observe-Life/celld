@@ -146,6 +146,11 @@ services:
       # 召回要同步调 weknora 混合检索与 rerank，预算与知识库容器一致
       CELLD_HANDLER_BUDGET_S: "900"
       CELLD_LTX_RETENTION_SECS: "604800"
+      # 画像的槽位归类与取代判定要走 Gemini（Google 直连不通，必须经翻墙容器）。
+      # mihomo 在 host 网络，backend 网桥内用网关 IP 访问它。
+      HTTP_PROXY: "http://172.23.0.1:7890"
+      HTTPS_PROXY: "http://172.23.0.1:7890"
+      NO_PROXY: "localhost,127.0.0.1,weknora-lite,minio,celld,celld-agent-to-rag,celld-wake-container,celld-typescript-check,172.23.0.0/16"
     volumes:
       - /vol1/docker/celld-knowledge-recall/data:/var/lib/celld
     command:

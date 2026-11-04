@@ -6,6 +6,9 @@ export interface Env {
   WEKNORA_URL: string;
   WEKNORA_KEY: string;
   RECALL_KB_IDS: string;
+  GEMINI_BASE: string;
+  GEMINI_MODEL: string;
+  GEMINI_KEY: string;
   /** 经验通道是否启用向量段（weknora 侧向量查询当前 60s 不返回，默认 0=只用关键词） */
   RECALL_CORPUS_VECTOR: string;
 }

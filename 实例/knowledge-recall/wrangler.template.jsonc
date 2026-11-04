@@ -10,6 +10,9 @@
     "WEKNORA_URL": "http://weknora-lite:8080",
     "WEKNORA_KEY": "@WEKNORA_KEY@",
     "RECALL_KB_IDS": "f8df17b2-b11a-40aa-80b1-2db1c0fd7fa4",
-    "RECALL_CORPUS_VECTOR": "0"
+    "RECALL_CORPUS_VECTOR": "0",
+    "GEMINI_BASE": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "GEMINI_MODEL": "gemini-3.1-flash-lite",
+    "GEMINI_KEY": "@GEMINI_KEY@"
   }
 }
