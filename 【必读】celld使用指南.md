@@ -67,7 +67,13 @@ Cloudflare 账号级平台天然支持「N 个独立 worker 各自部署、各�
 
 ### （一）celld 本体镜像
 
-**我们不构建 celld 本体**。运行用的是上游镜像 `ghcr.io/denoland/celld:latest`（由上游 `release.yml` 云构建，仓库里的 `Dockerfile` 是从 Rust 源码构建本体的定义，我们未使用）。
+**我们不构建 celld 本体**，运行用的是上游镜像 `ghcr.io/denoland/celld:latest`（由上游 `release.yml` 云构建）。
+
+依据（2026-11-05 核对提交记录）：`crates/` 下所有提交的作者都是上游（Ryan Dahl、Bartek Iwańczuk），最新一条是 v0.6.3；我们自己的 41 次提交只落在 `实例/`、`compose.yaml` 和文档，**没有一次改动 Rust 源码**。
+
+> ⚠️ **改 Rust 源码前必读**：`Dockerfile.toolbox` 是 `FROM ghcr.io/denoland/celld:latest` 再往上加 esbuild，**它不编译仓库里的 `crates/`**。所以如果哪天改了 Rust 源码，直接重建 `celld-full` 不会有任何报错，但改动**根本不会进入运行镜像**。要让它生效，必须把仓库根的 `Dockerfile`（从 Rust 源码构建本体）接进构建链。
+>
+> 别和 rag-ferrite 弄混：那个项目我们改了 Rust 源码，所以**是自己构建**的（`ghcr.io/observe-life/rag-ferrite:canary`，GitHub Actions 云构建）。
 
 ### （二）待命与唤醒容器镜像
 
