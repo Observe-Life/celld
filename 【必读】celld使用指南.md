@@ -69,6 +69,10 @@ Cloudflare 账号级平台天然支持「N 个独立 worker 各自部署、各�
 
 **我们不构建 celld 本体**。运行用的是上游镜像 `ghcr.io/denoland/celld:latest`（由上游 `release.yml` 云构建，仓库里的 `Dockerfile` 是从 Rust 源码构建本体的定义，我们未使用）。
 
+依据（2026-11-05 核对提交记录）：`crates/` 下所有提交的作者都是上游（Ryan Dahl、Bartek Iwańczuk），最新一条是 v0.6.3；我们自己的 41 次提交只落在 `实例/`、`compose.yaml` 与文档，没有一次改动 Rust 源码。运行镜像同样印证：`celld-full` 里 `COPY /out/celld` 那一层来自上游，我们加的层只有 esbuild 与 curl。
+
+> ⚠️ **改 Rust 源码前必读**：`Dockerfile.toolbox` 是 `FROM ghcr.io/denoland/celld:latest` 再往上加 esbuild，**它不编译仓库里的 `crates/`**。所以若改了 Rust 源码，直接重建 `celld-full` 不会报任何错，但改动不会进入运行镜像。要生效必须把仓库根的 `Dockerfile`（从 Rust 源码构建本体）接进构建链。
+
 ### （二）待命与唤醒容器镜像
 
 1. 源码在 `实例容器镜像源码/` 下，目前两个：`celld-typescript-check`、`celld-wake-container`。
