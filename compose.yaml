@@ -47,6 +47,13 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       CELLD_WATCH: "/var/lib/celld/state"
+      # 内存闸门（本次内存异常的正解）。不设这三项时 celld 的默认行为是：
+      # 常驻 cell 数无上限（CELLD_MAX_RESIDENT_CELLS=usize::MAX）、空闲驱逐整个
+      # 关闭（CELLD_IDLE_EVICT_S=None），且水位线取 cgroup limit 的 80%，于是它会
+      # 主动把内存爬到 limit*0.8 才肯释放 cell。实测 agent-to-rag 因此停在 342MiB。
+      CELLD_MAX_RSS_MB: "512"
+      CELLD_MAX_RESIDENT_CELLS: "64"
+      CELLD_IDLE_EVICT_S: "120"
       # JS 处理预算：多图转写 + 等解析可能超过默认 300s，放宽到 15 分钟（队列租约随之拉长）
       CELLD_HANDLER_BUDGET_S: "900"
       # 防复发：启用 epoch GC（保留 7 天），失败启动/旧 epoch 不再无限堆积
@@ -106,6 +113,13 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       CELLD_WATCH: "/var/lib/celld/state"
+      # 内存闸门（本次内存异常的正解）。不设这三项时 celld 的默认行为是：
+      # 常驻 cell 数无上限（CELLD_MAX_RESIDENT_CELLS=usize::MAX）、空闲驱逐整个
+      # 关闭（CELLD_IDLE_EVICT_S=None），且水位线取 cgroup limit 的 80%，于是它会
+      # 主动把内存爬到 limit*0.8 才肯释放 cell。实测 agent-to-rag 因此停在 342MiB。
+      CELLD_MAX_RSS_MB: "160"
+      CELLD_MAX_RESIDENT_CELLS: "32"
+      CELLD_IDLE_EVICT_S: "120"
       CELLD_HANDLER_BUDGET_S: "900"
       CELLD_LTX_RETENTION_SECS: "604800"
     volumes:
@@ -143,6 +157,13 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       CELLD_WATCH: "/var/lib/celld/state"
+      # 内存闸门（本次内存异常的正解）。不设这三项时 celld 的默认行为是：
+      # 常驻 cell 数无上限（CELLD_MAX_RESIDENT_CELLS=usize::MAX）、空闲驱逐整个
+      # 关闭（CELLD_IDLE_EVICT_S=None），且水位线取 cgroup limit 的 80%，于是它会
+      # 主动把内存爬到 limit*0.8 才肯释放 cell。实测 agent-to-rag 因此停在 342MiB。
+      CELLD_MAX_RSS_MB: "256"
+      CELLD_MAX_RESIDENT_CELLS: "32"
+      CELLD_IDLE_EVICT_S: "120"
       # 召回要同步调 weknora 混合检索与 rerank，预算与知识库容器一致
       CELLD_HANDLER_BUDGET_S: "900"
       CELLD_LTX_RETENTION_SECS: "604800"
