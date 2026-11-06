@@ -32,14 +32,11 @@ export async function collectWork(env: Env, limit?: number): Promise<CollectResu
       report.items.push({ uuid: meta.uuid, updated_at: meta.updated_at });
       continue;
     }
-    // ② 台账标了失败/未完成（2026-11-06 修复：原来只比 updated_at，
-    //    失败态 + 同版本 = 永远不再重试，会话就此从语料里消失）
-    if (ledger.parse_status !== "completed") {
-      report.items.push({ uuid: meta.uuid, updated_at: meta.updated_at });
-      continue;
-    }
-    // ③ 台账完成但语料里没有这份文档（静默丢失）
-    if (names && !names.has(ledger.md)) {
+    // ② 台账完成但语料里没有这份文档（2026-11-06 体检实证的静默丢失）。
+    //    注意：只按「语料里有没有文档」判定重推，不按 parse_status——
+    //    台账 pending/failed 但文档已在语料的（转写其实成功过、只是台账没落），
+    //    重推会白白重烧一次大模型转写费（c328511f 实测 230k 字会话）。
+    if (names && ledger.md && !names.has(ledger.md)) {
       report.items.push({ uuid: meta.uuid, updated_at: meta.updated_at });
       continue;
     }
