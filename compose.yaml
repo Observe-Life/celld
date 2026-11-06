@@ -113,7 +113,7 @@ services:
       # (CELLD_IDLE_EVICT_S=None)，且水位线取 cgroup limit 的 80%，
       # 于是它会主动把内存爬到 limit*0.8 才肯释放 cell。
       CELLD_MAX_RSS_MB: "256"
-      CELLD_MAX_RESIDENT_CELLS: "32"
+      CELLD_MAX_RESIDENT_CELLS: "4"
       CELLD_IDLE_EVICT_S: "120"
       CELLD_BUCKET: "s3://celld-rag"
       S3_ENDPOINT: "http://minio:9000"
