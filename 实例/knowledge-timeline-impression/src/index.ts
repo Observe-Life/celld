@@ -8,6 +8,7 @@
 // 所以这里的词法通道是「trigram 优先 + 短词 LIKE 回退」，不能只依赖 FTS5。
 import type { Env } from "./env";
 import { handleProfile } from "./profile";
+import { queryTerms } from "./lib/tokens";
 
 /** 迁移只进不退：新列一律用 ADD COLUMN + 默认值，禁止 DROP/改名。 */
 const SCHEMA = `
@@ -66,6 +67,13 @@ async function ensureSchema(env: Env): Promise<void> {
 async function putTimeline(env: Env, items: TimelineInput[]): Promise<{ written: number }> {
   if (!items.length) return { written: 0 };
   const nowIso = new Date().toISOString();
+  // 先按 knowledge_id 清掉旧条目再写：会话每次更新都会重新登记全量消息，
+  // 不清就会出现同一句话以不同 seq 重复存在（实测发生过）。
+  const docIds = [...new Set(items.map((x) => x.knowledge_id))];
+  for (const kid of docIds) {
+    await env.DB.prepare("DELETE FROM timeline_fts WHERE entry_id LIKE ?").bind(`${kid}:%`).run();
+    await env.DB.prepare("DELETE FROM timeline_entries WHERE knowledge_id = ?").bind(kid).run();
+  }
   const stmts = [];
   for (const it of items) {
     const seq = it.seq ?? 0;
@@ -106,7 +114,17 @@ async function putTimeline(env: Env, items: TimelineInput[]): Promise<{ written:
   return { written };
 }
 
-/** 时间窗 + 词法召回。词法：≥3 字走 trigram，<3 字回退 LIKE（P0 实测的坑）。 */
+/**
+ * 时间窗 + 词法召回。
+ *
+ * 2026-11-06 修复（体检坐实）：旧实现按空白分词取第一个词，中文整句没有空格
+ * 恒等于 1 个词，且 trigram 分支只 JOIN 了 timeline_fts 却从未写 MATCH 条件，
+ * 查询词被整个丢弃——任何问法都返回「最近几条」，用户原话因此被当记忆注入。
+ *
+ * 现口径：queryTerms() 把查询切成「单字+双字/ASCII 词」（与 rag-ferrite 的
+ * fts_text 同口径），对 snippet 做 OR-LIKE。时间轴当前 854 行，LIKE 足够；
+ * timeline_fts 表保留但不再使用（退役记录：等入库规模上万再迁词元倒排）。
+ */
 async function queryTimeline(
   env: Env,
   q: string,
@@ -117,9 +135,7 @@ async function queryTimeline(
   subject?: string,
 ) {
   const cap = Math.min(Math.max(limit, 1), 100);
-  const words = q.trim().split(/\s+/).filter(Boolean);
-  const likeWord = words[0] ?? "";
-  const useTrigram = likeWord.length >= 3;
+  const terms = queryTerms(q, 8);
 
   const where: string[] = ["t.deleted = 0"];
   const args: unknown[] = [];
@@ -128,25 +144,23 @@ async function queryTimeline(
   if (sourceKind) { where.push("t.source_kind = ?"); args.push(sourceKind); }
   if (subject) { where.push("t.subject = ?"); args.push(subject); }
 
-  let joinFts = false;
-  if (useTrigram) {
-    where.push("t.id = f.entry_id");
-    joinFts = true;
-  } else if (likeWord) {
-    where.push("t.snippet LIKE ?");
-    args.push(`%${likeWord}%`);
+  if (terms.length) {
+    // LIKE 通配符转义：词元来自用户输入，% 与 _ 必须按字面匹配
+    const pats = terms.map((t) => `%${t.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    where.push(`(${pats.map(() => "t.snippet LIKE ? ESCAPE '\\'").join(" OR ")})`);
+    args.push(...(pats as never[]));
   }
 
   const sql =
     `SELECT t.id, t.knowledge_id, t.seq, t.event_time, t.snippet, t.title, t.source_kind, t.channel, t.conversation_id
-     FROM timeline_entries t${joinFts ? ", timeline_fts f" : ""}
+     FROM timeline_entries t
      WHERE ${where.join(" AND ")}
      ORDER BY t.event_time DESC LIMIT ?`;
   const rows = await env.DB
     .prepare(sql)
     .bind(...(args as never[]), cap)
     .all<Record<string, string | number | null>>();
-  return { mode: useTrigram ? "trigram" : likeWord ? "like" : "time-only", count: rows.results.length, hits: rows.results };
+  return { mode: terms.length ? "terms" : "time-only", count: rows.results.length, hits: rows.results };
 }
 
 /** 对账：时间轴覆盖了多少素材、有多少孤儿（素材已删但时间轴还在）。 */

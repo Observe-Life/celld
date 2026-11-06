@@ -2,6 +2,7 @@
 // 与旧版的唯一区别：items 带上 updated_at，因为实例号需要版本（同会话更新要能新建实例）。
 import type { Env } from "../env";
 import { getLedger, isApproved, listMetas, type SessionMeta } from "../lib/store";
+import { listDocuments } from "../lib/ragferrite";
 
 export interface WorkItem {
   uuid: string;
@@ -14,11 +15,33 @@ export interface CollectResult {
 
 export async function collectWork(env: Env, limit?: number): Promise<CollectResult> {
   const report: CollectResult = { items: [] };
+  // 语料名单取一次：用于发现「台账说完成、rag-ferrite 里却没有」的静默丢失。
+  // 2026-11-06 体检实证过一例：台账 completed、md 已生成，语料里却没有该文档。
+  // 名单获取失败时不做缺失判定（保持原有自愈能力，不因上游抖动放大重推）。
+  let names: Set<string> | null = null;
+  try {
+    names = new Set((await listDocuments(env)).map((d) => d.name));
+  } catch {
+    names = null;
+  }
   for (const meta of await listMetas(env.STATE)) {
     if (!(await isApproved(env.STATE, meta.uuid))) continue; // 未审批（含已下架）永不自愈复活
     const ledger = await getLedger(env.STATE, meta.uuid);
+    // ① 台账缺失或版本落后（原有口径）
     if (!ledger || ledger.updated_at !== meta.updated_at) {
       report.items.push({ uuid: meta.uuid, updated_at: meta.updated_at });
+      continue;
+    }
+    // ② 台账标了失败/未完成（2026-11-06 修复：原来只比 updated_at，
+    //    失败态 + 同版本 = 永远不再重试，会话就此从语料里消失）
+    if (ledger.parse_status !== "completed") {
+      report.items.push({ uuid: meta.uuid, updated_at: meta.updated_at });
+      continue;
+    }
+    // ③ 台账完成但语料里没有这份文档（静默丢失）
+    if (names && !names.has(ledger.md)) {
+      report.items.push({ uuid: meta.uuid, updated_at: meta.updated_at });
+      continue;
     }
   }
   report.items.sort((a, b) => (a.uuid < b.uuid ? 1 : -1));

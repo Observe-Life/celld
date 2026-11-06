@@ -16,6 +16,8 @@ interface RecallHit {
   snippet: string | undefined;
   title: string | undefined;
   score: number | undefined;
+  /** 时间轴命中才带：用于「排除当前会话」（切断自我回声） */
+  conversation_id: string | undefined;
 }
 
 const TIMELINE_BASE = "http://internal";
@@ -296,6 +298,7 @@ async function fromTimeline(
   limit: number,
   kind: string,
   subject: string,
+  exclude: Set<string>,
 ): Promise<TlResult> {
   const p = new URLSearchParams({ q, limit: String(limit) });
   if (since) p.set("since", since);
@@ -309,7 +312,10 @@ async function fromTimeline(
       hits?: Array<Record<string, string | number | null>>;
     };
     if (!d.ok) return { hits: [], mode: "unavailable", error: d.error ?? "timeline not ok" };
-    const hits: RecallHit[] = (d.hits ?? []).map((h) => ({
+    // 排除当前会话：本会话的原话不该作为「记忆」回灌给自己（自我回声，体检坐实）
+    const hits: RecallHit[] = (d.hits ?? [])
+      .filter((h) => !(h.conversation_id && exclude.has(String(h.conversation_id).toLowerCase())))
+      .map((h) => ({
       source: "timeline",
       knowledge_id: String(h.knowledge_id ?? ""),
       event_time: h.event_time == null ? undefined : String(h.event_time),
@@ -317,6 +323,7 @@ async function fromTimeline(
       snippet: h.snippet == null ? undefined : String(h.snippet),
       title: h.title == null ? undefined : String(h.title),
       score: undefined,
+      conversation_id: h.conversation_id == null ? undefined : String(h.conversation_id),
     }));
     return { hits, mode: d.mode ?? "unknown", error: undefined };
   } catch (e) {
@@ -347,7 +354,7 @@ function uuidFromSourceName(name: string): string | null {
  *      disable_vector_match=true 只跑关键词。rag-ferrite 实测 0.17–0.79 秒全链路完成。
  *   2. 单库。没有知识库这一层，因此不再有 RECALL_KB_IDS 多库循环。
  */
-async function fromCorpus(env: Env, q: string, limit: number): Promise<CpResult> {
+async function fromCorpus(env: Env, q: string, limit: number, exclude: Set<string>): Promise<CpResult> {
   if (!q) return { hits: [], error: "经验通道需要 q", dropped: 0 };
   const base = env.RAGF_URL.replace(/\/$/, "");
   const out: RecallHit[] = [];
@@ -376,11 +383,14 @@ async function fromCorpus(env: Env, q: string, limit: number): Promise<CpResult>
       // 被丢弃的条数经 corpus_no_rerank 返回，可观测；待 R0（分类器改按词元计数）修好即恢复。
       const rr = seg.rerank_score;
       if (rr == null) { dropped += 1; continue; }
+      const kid = (uuidFromSourceName(name) ?? name).toLowerCase();
+      if (exclude.has(kid)) { dropped += 1; continue; }  // 当前会话不回灌
       out.push({
         source: "corpus",
         // 归一到会话 uuid，与时间轴通道同源；取不到则用文件名兜底
         knowledge_id: uuidFromSourceName(name) ?? name,
         event_time: undefined,
+        conversation_id: undefined,
         seq: seg.chunk_index == null ? undefined : Number(seg.chunk_index),
         snippet: text.slice(0, 500),
         title: name || undefined,
@@ -422,10 +432,16 @@ export default {
 
       const weights = planWeights(q, forced);
       // 三通道并行；任一失败只降级、不阻断其余（degraded 里如实记录）
+      // exclude：调用方传来的「当前会话 uuid」。命中它的素材一律不注入——
+      // 会话会被定时入库，不排除就会把自己刚说的话当召回结果回灌（自我回声）。
+      const exclude = new Set(
+        (url.searchParams.get("exclude") ?? "")
+          .split(",").map((s) => s.trim().toLowerCase()).filter((s) => /^[0-9a-f-]{36}$/.test(s)),
+      );
       const [tl, pf, cp] = await Promise.all([
-        weights.timeline > 0 ? fromTimeline(env, q, since, until, weights.timeline, kind, subject) : Promise.resolve(SKIP_TL),
+        weights.timeline > 0 ? fromTimeline(env, q, since, until, weights.timeline, kind, subject, exclude) : Promise.resolve(SKIP_TL),
         weights.profile > 0 ? fromProfile(env, q, weights.profile) : Promise.resolve(SKIP_PF),
-        weights.corpus > 0 ? fromCorpus(env, q, weights.corpus) : Promise.resolve(SKIP_CP),
+        weights.corpus > 0 ? fromCorpus(env, q, weights.corpus, exclude) : Promise.resolve(SKIP_CP),
       ]);
 
       const degraded: string[] = [];
@@ -555,12 +571,25 @@ export default {
   // 本实例是根，cron 在这里才会触发（celld 限制：cohosted worker 的 cron 永不运行）
   async scheduled(controller: unknown, env: Env): Promise<void> {
     const cron = (controller as { cron?: string })?.cron ?? "";
+    // 1) 时间轴对账（原有）
     try {
       const res = await env.TIMELINE.fetch(new Request(`${TIMELINE_BASE}/timeline/reconcile`));
       const d = await res.json();
       console.log("[knowledge-recall] scheduled", JSON.stringify({ cron, reconcile: d }));
     } catch (e) {
       console.error("[knowledge-recall] scheduled reconcile failed", String(e).slice(0, 200));
+    }
+    // 2) 画像整理（2026-11-06 补上：此前 consolidate 从未自动运行，过期归档、
+    //    访问衰减与同槽位合并全靠手动，测试数据因此堆了两天才被发现）
+    try {
+      const c = await env.TIMELINE.fetch(
+        new Request(`${TIMELINE_BASE}/profile/consolidate`, {
+          method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+        }),
+      );
+      console.log("[knowledge-recall] consolidate", JSON.stringify(await c.json()).slice(0, 300));
+    } catch (e) {
+      console.error("[knowledge-recall] consolidate failed", String(e).slice(0, 200));
     }
   },
 };

@@ -7,6 +7,7 @@
 //   · xopc：「newer ≠ more authoritative」——推断不能覆盖用户显式声明
 // 所以这里的规则是：槽位化取代（确定性）+ 显式优先 + 只关有效期不删数据。
 import type { Env } from "./env";
+import { queryTerms } from "./lib/tokens";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS profile_items (
@@ -88,7 +89,9 @@ const SLOTS: Array<[string, string, string, number, string]> = [
 const TTL_DAYS: Record<string, number> = {
   task: 2, event: 7, preference: 60, relation: 90, fact: 180, profile: 3650, interest: 3650,
 };
-const BLOCK_CHARS = 900;
+/** 常驻块字符预算。2026-11-06 从 900 提到 1200：真实画像 13 条已用 792 字，
+ *  旧值下再加两条真实画像就会触发「从后往前整块砍掉」的静默截断（fill 是 break 不是 skip）。 */
+const BLOCK_CHARS = 1200;
 const RECALL_CHARS = 600;
 const RECALL_MAX_ITEMS = 5;
 const INTEREST_HITS = 3;
@@ -223,6 +226,10 @@ async function putProfile(env: Env, input: ProfileInput) {
         stmts.push(env.DB.prepare("UPDATE profile_items SET supersedes=? WHERE id=?").bind(o.id, id));
       }
       if (olds.results.length) {
+        // 2026-11-06 修复（体检坐实）：原代码在这里先 return，下面的 batch 永远
+        // 执行不到——新条目没写入、旧条目没退位，接口却返回成功。实测：同槽位
+        // 连写两次（微信→短信），库里只剩第一次的内容。
+        await env.DB.batch(stmts);
         return { ok: true, id, status, slot, superseded: olds.results.map((x) => x.id) };
       }
     }
@@ -245,11 +252,17 @@ async function recallProfile(env: Env, q: string) {
   ).bind(now).all<{ kind: string; content: string }>();
 
   let situational: Array<{ kind: string; content: string }> = [];
-  const words = q.trim().split(/\s+/).filter((w) => w.length >= 2).slice(0, 4);
+  // 2026-11-06 修复：原来按空白分词，中文整句变成一个两百分字符的 LIKE 模式，
+  // 永不命中且触发 D1 的「LIKE or GLOB pattern too complex」，把整个画像通道
+  // （包括与问题无关的常驻块）一起打挂——实测长句查询注入为 0 字。
+  const words = queryTerms(q, 4).filter((w) => [...w].length >= 2 || /\d/.test(w)).slice(0, 4);
   if (words.length) {
-    const or = words.map(() => "(content LIKE ? OR topic LIKE ?)").join(" OR");
+    const or = words.map(() => "(content LIKE ? ESCAPE '\\' OR topic LIKE ? ESCAPE '\\')").join(" OR");
     const args: string[] = [];
-    for (const w of words) args.push(`%${w}%`, `%${w}%`);
+    for (const w of words) {
+      const p = `%${w.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      args.push(p, p);
+    }
     const r = await env.DB.prepare(
       `SELECT kind, content FROM profile_items
        WHERE status='active' AND invalid_at IS NULL AND kind IN ('fact','task')
@@ -387,8 +400,9 @@ export async function handleProfile(
     return Response.json({ ok: true, updated: r.meta?.changes ?? 0 });
   }
   if (path === "/profile/noslot") {
+    // 2026-11-06 修复：AND/OR 优先级错误会把已归档/待确认条目也扫进回填清单
     const rows = await env.DB.prepare(
-      "SELECT id, kind, content FROM profile_items WHERE status='active' AND slot = '' OR slot IS NULL ORDER BY updated_at DESC LIMIT 200",
+      "SELECT id, kind, content FROM profile_items WHERE status='active' AND (slot = '' OR slot IS NULL) ORDER BY updated_at DESC LIMIT 200",
     ).all<Record<string, unknown>>();
     return Response.json({ ok: true, items: rows.results });
   }

@@ -135,6 +135,24 @@ export default {
     if (url.pathname === "/files" && request.method === "GET") {
       return Response.json({ ok: true, files: await listMd(env.FILES) });
     }
+
+    // 入库回执（2026-11-06 新增）：插件的「受理 200」只代表已排队，不代表入库完成。
+    // 体检实证：插件按受理记账后，会话从语料里静默消失（台账 completed、语料缺失）。
+    // 对账口径改为：只有 parse_status=completed 的台账才算入库完成。
+    if (url.pathname === "/receipts" && request.method === "GET") {
+      const receipts: Array<Record<string, unknown>> = [];
+      for (const m of await listMetas(env.STATE)) {
+        const l = await getLedger(env.STATE, m.uuid);
+        receipts.push({
+          uuid: m.uuid,
+          md: l?.md ?? null,
+          parse_status: l?.parse_status ?? "none",
+          updated_at: l?.updated_at ?? m.updated_at,
+          synced_at: l?.synced_at ?? null,
+        });
+      }
+      return Response.json({ ok: true, receipts });
+    }
     const fileMatch = url.pathname.match(/^\/files\/(.+)$/);
     if (fileMatch && request.method === "GET") {
       const name = decodeURIComponent(fileMatch[1] ?? "");
