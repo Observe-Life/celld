@@ -6908,6 +6908,9 @@ class __QueueCell {
               now,
             );
           } else {
+            console.warn(
+              `[queues] 消息转入死信队列：seq=${lease.seq} attempts=${expiry.attempt} dlq=${JSON.stringify(consumer.deadLetterQueue)}`,
+            );
             sql.exec(
               `UPDATE ${__QUEUE_MESSAGES}
                   SET attempts = ?, lease_id = NULL, leased_until = NULL,
@@ -7746,6 +7749,9 @@ const __d1BindValue = (value) => {
     // preceded this produced elements the engine then refused as bytes.
     if (ArrayBuffer.isView(value)) return Array.from(Uint8Array.from(value));
   }
+  console.warn(
+    `[d1] 绑定类型不支持：kind=${kind} value=${JSON.stringify(String(value).slice(0, 120))}`,
+  );
   const error = new Error(
     `D1_TYPE_ERROR: Type '${kind}' not supported for value '${value}'`,
   );
@@ -8564,6 +8570,9 @@ const __wfMakeStep = (driver) => {
           ? attempt
           : 1;
         const nextAt = Date.now() + base * factor;
+        console.warn(
+          `[workflows] step 重试：step=${JSON.stringify(name)} attempt=${attempt} 下次=${new Date(nextAt).toISOString()}`,
+        );
         await storage.put(key, {
           kind: "do",
           status: "retrying",
@@ -8762,6 +8771,9 @@ const __WorkflowCell = (() => {
       transaction.kv.put("__wf.meta", meta);
     }
     if (meta.expiresMs > now) return false;
+    console.info(
+      `[workflows] 保留期到期，清理实例元数据：instance=${JSON.stringify(meta.instanceId)} status=${meta.status}`,
+    );
     clearInstance(transaction);
     return true;
   };
@@ -9188,6 +9200,9 @@ const __WorkflowCell = (() => {
           if (driver.finished || driver.running !== 0 || driver.blocked.length > 0) {
             return;
           }
+          console.error(
+            "[workflows] 实例失败：run() 挂起 60 秒且无步骤在跑或阻塞（长异步工作必须包进 step.do）",
+          );
           driver.finish({
             kind: "error",
             error: __wfError(
