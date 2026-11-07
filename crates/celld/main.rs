@@ -2386,10 +2386,20 @@ async fn handle_ingress(
             // Saturation is not a failure of the request. Answering it now
             // lets the caller retry or shed; holding the connection until its
             // own deadline is what a node with no capacity used to do.
-            Some(refused @ celld::pool::AdmitError::Refused(_)) => response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Worker refused: {refused}"),
-            ),
+            Some(refused @ celld::pool::AdmitError::Refused(_)) => {
+                crate::records::error(
+                    "node",
+                    std::env::var("CELLD_NODE").unwrap_or_else(|_| "celld".into()).as_str(),
+                    "admission",
+                    "admission_refused",
+                    format!("Worker refused: {refused}"),
+                    "{}",
+                );
+                response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Worker refused: {refused}"),
+                )
+            }
             // A build failure is a fault, not saturation.
             Some(celld::pool::AdmitError::Build(_)) | None => response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2878,6 +2888,24 @@ async fn handle_internal(
     let evict_scope = path.strip_prefix("/evict/");
     let result = match path.as_str() {
         "/peer/probe" => internal_probe(request, app).await,
+        "/records/append" if request.method() == hyper::Method::POST => {
+            let body = request.into_body();
+            let bytes = match collect_limited_body(body, 4 * 1024 * 1024).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return response(StatusCode::BAD_REQUEST, format!("records body: {error}"))
+                }
+            };
+            match crate::records::ingest_json(&bytes) {
+                Ok(accepted) => {
+                    response(StatusCode::OK, format!("{{\"ok\":true,\"accepted\":{accepted}}}"))
+                }
+                Err(error) => response(
+                    StatusCode::BAD_REQUEST,
+                    format!("{{\"ok\":false,\"error\":\"{error}\"}}"),
+                ),
+            }
+        }
         "/peer/handoff" => internal_handoff(request, app).await,
         _ if path.starts_with("/peer/log/") => internal_log(request, app, path.clone()).await,
         "/state" => response(StatusCode::OK, app.snapshot().await),
@@ -3440,6 +3468,7 @@ const DEFAULT_REBALANCE_BATCH_CELLS: usize = 32;
 const LOCAL_CACHE_PRUNE_PERIOD: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn main() -> anyhow::Result<()> {
+    crate::records::ensure_init();
     celld::env_vars::validate()?;
     // Parse the telemetry group once, before any command or runtime work.
     // Its specialized values share the strict scalar parsers in env_vars.

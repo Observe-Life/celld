@@ -4222,16 +4222,22 @@ impl Actor {
                         "SELF-FENCE: node lease not renewed within TTL — halting"
                     )
                     }
-                    celld_logic::HaltReason::NodeLeaseMissing => tracing::warn!(
+                    celld_logic::HaltReason::NodeLeaseMissing => {
+                        crate::records::error("node", self.state.node(), "lease", "self_fence", "SELF-FENCE: node lease record is missing — halting".into(), format!("{{\"code\":{code:?}}}"));
+                        tracing::warn!(
                         event = "node_lease_record_missing_fence",
                         code,
                         "SELF-FENCE: node lease record is missing — halting"
-                    ),
-                    celld_logic::HaltReason::NodeLeaseMismatch => tracing::warn!(
+                    )
+                    }
+                    celld_logic::HaltReason::NodeLeaseMismatch => {
+                        crate::records::error("node", self.state.node(), "lease", "self_fence", "SELF-FENCE: node lease record no longer matches this process — halting".into(), format!("{{\"code\":{code:?}}}"));
+                        tracing::warn!(
                         event = "node_lease_record_mismatch_fence",
                         code,
                         "SELF-FENCE: node lease record no longer matches this process — halting"
-                    ),
+                    )
+                    }
                 }
                 let _ = self.fence.send(code);
             }

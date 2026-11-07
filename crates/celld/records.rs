@@ -155,21 +155,167 @@ fn flush(conn: &Connection, container: &str, batch: &mut Vec<Record>) {
 
 static INIT: OnceLock<()> = OnceLock::new();
 
-/// Initialize once from the environment. `CELLD_RECORDS_DB` names the
-/// database; without it the node records nothing and counts drops.
+/// Initialize once from the environment. `CELLD_RECORDS_DB` names the local
+/// database (the records center on the main container); `CELLD_RECORDS_ENDPOINT`
+/// makes this node ship its records to that center over the internal
+/// listener. With neither, the node records nothing and counts drops.
 pub fn ensure_init() {
     if INIT.get().is_some() {
         return;
     }
-    let db = match std::env::var("CELLD_RECORDS_DB") {
-        Ok(v) if !v.is_empty() => v,
-        _ => {
-            INIT.set(()).ok();
+    let node = std::env::var("CELLD_NODE").unwrap_or_else(|_| "celld".into());
+    if let Ok(db) = std::env::var("CELLD_RECORDS_DB") {
+        if !db.is_empty() {
+            let _ = init(&db, &node);
             return;
         }
+    }
+    if let Ok(ep) = std::env::var("CELLD_RECORDS_ENDPOINT") {
+        if !ep.is_empty() {
+            let _ = sender_init(&ep, &node);
+            return;
+        }
+    }
+    INIT.set(()).ok();
+}
+
+fn sender_init(endpoint: &str, container: &str) -> Result<()> {
+    let (tx, rx): (Sender<Record>, Receiver<Record>) = mpsc::sync_channel(CHANNEL_CAPACITY);
+    let endpoint = endpoint.to_string();
+    let container = container.to_string();
+    std::thread::Builder::new()
+        .name("records-sender".into())
+        .spawn(move || sender(endpoint, container, rx))?;
+    SENDER.set(Some(tx)).ok();
+    Ok(())
+}
+
+/// Ship mode: drain the channel and POST batches to the records center.
+/// A failed shipment keeps the batch and retries on the next tick, so a
+/// short collector outage loses nothing; the cap bounds memory.
+fn sender(endpoint: String, container: String, rx: Receiver<Record>) {
+    let mut batch: Vec<Record> = Vec::new();
+    loop {
+        match rx.recv_timeout(FLUSH_INTERVAL) {
+            Ok(r) => batch.push(r),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                ship(&endpoint, &container, &mut batch);
+                return;
+            }
+        }
+        if batch.len() >= BATCH_MAX || !batch.is_empty() {
+            ship(&endpoint, &container, &mut batch);
+        }
+        while batch.len() > 4 * BATCH_MAX {
+            batch.remove(0);
+        }
+    }
+}
+
+fn ship(endpoint: &str, container: &str, batch: &mut Vec<Record>) {
+    if batch.is_empty() {
+        return;
+    }
+    let records: Vec<serde_json::Value> = batch
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "subject_type": r.subject_type,
+                "subject_id": r.subject_id,
+                "module": r.module,
+                "level": r.level,
+                "code": r.code,
+                "message": r.message,
+                "context": r.context,
+            })
+        })
+        .collect();
+    let body = serde_json::json!({ "container": container, "records": records }).to_string();
+    match http_post_json(endpoint, &body) {
+        Ok(status) if (200..300).contains(&status) => batch.clear(),
+        status => {
+            tracing::warn!(target: "celld::records", status = ?status, "records shipment deferred; will retry");
+            if batch.len() > 4 * BATCH_MAX {
+                batch.drain(..BATCH_MAX);
+            }
+        }
+    }
+}
+
+/// Minimal HTTP/1.1 POST over a blocking socket. The endpoint is an internal
+/// listener on the fleet network, so plaintext is the transport contract.
+fn http_post_json(url: &str, body: &str) -> std::io::Result<u16> {
+    use std::io::{Read, Write};
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "records endpoint must be http://"))?;
+    let (hostport, path) = match rest.split_once('/') {
+        Some((h, pth)) => (h, format!("/{}", pth)),
+        None => (rest, "/".to_string()),
     };
-    let container = std::env::var("CELLD_NODE").unwrap_or_else(|_| "celld".into());
-    let _ = init(&db, &container);
+    let mut stream = std::net::TcpStream::connect(hostport)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(request.as_bytes())?;
+    let mut head = [0u8; 512];
+    let n = stream.read(&mut head).unwrap_or(0);
+    let text = String::from_utf8_lossy(&head[..n]);
+    let status = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    Ok(status)
+}
+
+/// Receive shipped records from a peer node. Returns the accepted count.
+pub fn ingest_json(bytes: &[u8]) -> Result<usize> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let container = value
+        .get("container")
+        .and_then(|v| v.as_str())
+        .unwrap_or("peer")
+        .to_string();
+    let items = value
+        .get("records")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("records array missing"))?;
+    let Some(handle) = ingest_handle() else {
+        return Err(anyhow::anyhow!("records center disabled on this node"));
+    };
+    let mut accepted = 0usize;
+    for item in items {
+        let get = |k: &str| {
+            item.get(k)
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .unwrap_or_default()
+        };
+        let r = Record {
+            subject_type: "instance",
+            subject_id: get("subject_id"),
+            module: Box::leak(get("module").into_boxed_str()),
+            level: Box::leak(match get("level").as_str() {
+                "error" => "error".to_string(),
+                "warn" => "warn".to_string(),
+                other => other,
+            }
+            .into_boxed_str()),
+            code: get("code"),
+            message: get("message"),
+            context: get("context"),
+        };
+        if handle.push(r) {
+            accepted += 1;
+        }
+    }
+    let _ = container;
+    Ok(accepted)
 }
 
 /// Initialize the writer. Returns after the schema is ensured on a probe
