@@ -608,7 +608,7 @@ pub fn errors_current() -> Result<Vec<serde_json::Value>> {
                 .unwrap_or_default());
         }
     }
-    let conn = Connection::open_with_flags(&alerts_db(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = Connection::open_with_flags(alerts_db().as_str(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(
         "SELECT json_object('ts',ts,'container',container,'module',module,'code',code,'level',level,'message',message_full)
          FROM records WHERE level='error' ORDER BY id DESC LIMIT 50",
@@ -642,7 +642,7 @@ pub fn alerts_json() -> Result<serde_json::Value> {
 
 /// 主节点路由用：最近 error 记录的 JSON（供 GET /records/errors）。
 pub fn errors_json() -> Result<serde_json::Value> {
-    let conn = Connection::open_with_flags(&alerts_db(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = Connection::open_with_flags(alerts_db().as_str(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(
         "SELECT json_object('ts',ts,'container',container,'module',module,'code',code,'level',level,'message',message_full)
          FROM records WHERE level='error' ORDER BY id DESC LIMIT 50",
@@ -719,41 +719,6 @@ pub fn ack_all(db_path: &str, note: &str) -> Result<usize> {
         n += 1;
     }
     Ok(n)
-}
-
-fn banner_lines(db_path: &str) -> Option<Vec<String>> {
-    let alerts = unacked_alerts(db_path).ok()?;
-    if alerts.is_empty() {
-        return None;
-    }
-    let mut lines = vec![format!(
-        "[记录中心·未确认报错 {} 条——进门必读，处理前不得忽略]",
-        alerts.len()
-    )];
-    for (i, a) in alerts.iter().enumerate().take(9) {
-        lines.push(format!(
-            "{}. [{}] {}/{} ×{} 最新 {} | {}",
-            i + 1,
-            a.container,
-            a.module,
-            a.code,
-            a.count,
-            &a.latest[..a.latest.len().min(19)],
-            a.sample.chars().take(60).collect::<String>()
-        ));
-    }
-    if alerts.len() > 9 {
-        lines.push(format!("… 其余 {} 条见完整查询", alerts.len() - 9));
-    }
-    lines.push(
-        "完整查看所有报错（必须看完，再在回答中统一汇报给用户，不得遗漏）：".into(),
-    );
-    lines.push(format!(
-        "  celld records status   （数据库：{db_path}）"
-    ));
-    lines.push("解除阻断（原句确认，三小时冷却）：".into());
-    lines.push("  celld records ack --note \"我知道了，我会转告用户的\"".into());
-    Some(lines)
 }
 
 /// 进门横幅：有未确认报错时打印到 stderr（半强制）。任何失败都静默。
