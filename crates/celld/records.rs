@@ -548,7 +548,8 @@ fn http_get_json(url: &str) -> std::io::Result<String> {
     let mut stream = std::net::TcpStream::connect(hostport)?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: {hostport}\r\nConnection: close\r\n\r\n").as_bytes())?;
+    // HTTP/1.0：服务端不会用 chunked 帧，body 即纯 JSON，裸 socket 可直接解析。
+    stream.write_all(format!("GET {path} HTTP/1.0\r\nHost: {hostport}\r\n\r\n").as_bytes())?;
     let mut response = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
