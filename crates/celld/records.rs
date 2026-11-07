@@ -31,6 +31,9 @@ pub struct Record {
     pub code: String,
     pub message: String,
     pub context: String,
+    /// The container the record came from. `None` stamps the writer's own
+    /// label; shipped records carry the shipper's.
+    pub container: Option<String>,
 }
 
 fn now_iso() -> String {
@@ -121,7 +124,7 @@ fn writer(db_path: String, container: String, rx: Receiver<Record>) {
     }
 }
 
-fn flush(conn: &Connection, container: &str, batch: &mut Vec<Record>) {
+fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
     if batch.is_empty() {
         return;
     }
@@ -143,7 +146,7 @@ fn flush(conn: &Connection, container: &str, batch: &mut Vec<Record>) {
             kind,
             r.subject_type,
             r.subject_id,
-            container,
+            r.container.as_deref().unwrap_or(default_container),
             r.module,
             r.level,
             r.code,
@@ -277,7 +280,7 @@ fn http_post_json(url: &str, body: &str) -> std::io::Result<u16> {
 /// Receive shipped records from a peer node. Returns the accepted count.
 pub fn ingest_json(bytes: &[u8]) -> Result<usize> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
-    let container = value
+    let shipper = value
         .get("container")
         .and_then(|v| v.as_str())
         .unwrap_or("peer")
@@ -298,20 +301,25 @@ pub fn ingest_json(bytes: &[u8]) -> Result<usize> {
         };
         let level = get("level");
         let module = get("module");
+        let subject_type = Box::leak(
+            get("subject_type")
+                .replace("instance", "instance")
+                .into_boxed_str(),
+        );
         let r = Record {
-            subject_type: "instance",
+            subject_type: if subject_type.is_empty() { "instance" } else { subject_type },
             subject_id: get("subject_id"),
             module: Box::leak(module.into_boxed_str()),
             level: Box::leak(level.into_boxed_str()),
             code: get("code"),
             message: get("message"),
             context: get("context"),
+            container: Some(shipper.clone()),
         };
         if handle.push(r) {
             accepted += 1;
         }
     }
-    let _ = container;
     Ok(accepted)
 }
 
@@ -347,15 +355,15 @@ fn send(r: Record) {
 }
 
 pub fn error(subject_type: &'static str, subject_id: &str, module: &'static str, code: &str, message: String, context: String) {
-    send(Record { subject_type, subject_id: subject_id.to_string(), module, level: "error", code: code.to_string(), message, context });
+    send(Record { subject_type, subject_id: subject_id.to_string(), module, level: "error", code: code.to_string(), message, context, container: None });
 }
 
 pub fn warn(subject_type: &'static str, subject_id: &str, module: &'static str, code: &str, message: String, context: String) {
-    send(Record { subject_type, subject_id: subject_id.to_string(), module, level: "warn", code: code.to_string(), message, context });
+    send(Record { subject_type, subject_id: subject_id.to_string(), module, level: "warn", code: code.to_string(), message, context, container: None });
 }
 
 pub fn info(subject_type: &'static str, subject_id: &str, module: &'static str, code: &str, message: String, context: String) {
-    send(Record { subject_type, subject_id: subject_id.to_string(), module, level: "info", code: code.to_string(), message, context });
+    send(Record { subject_type, subject_id: subject_id.to_string(), module, level: "info", code: code.to_string(), message, context, container: None });
 }
 
 /// Dropped-record counter, surfaced by diagnose so a silent observability
