@@ -14,7 +14,7 @@ stable release. Each file carries the version in the object metadata name
 
 | variable | default | effect |
 | --- | --- | --- |
-| `CELLD_OTEL` | `0` | `0` disables telemetry. `1` writes Parquet to the fleet bucket. An HTTP(S) collector base URL selects OTLP/HTTP protobuf. |
+| `CELLD_OTEL` | `0` | `0` disables telemetry. `1` writes Parquet to the fleet bucket. An HTTP(S) collector base URL selects OTLP/HTTP protobuf. `records` writes the same spans and logs into the records center database (`CELLD_RECORDS_DB`) as the `otel_spans` and `otel_logs` tables. |
 | `CELLD_OTEL_BUCKET` | the fleet bucket | A different bucket for the Parquet files, on the same endpoint and credentials. |
 | `CELLD_OTEL_RETENTION` | `30d` | celld deletes telemetry files older than this. `none` disables the deletion, so your own lifecycle rules can control the data. In the fleet bucket, such a rule must select only the `telemetry/` prefix, after the key prefix if the bucket value has one. [Guarantees](guarantees.md) lists the reserved prefixes that a rule must not select. |
 | `CELLD_OTEL_FLUSH_MS` | `300000` | celld writes a Parquet file after this many milliseconds of buffered events. |

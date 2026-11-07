@@ -77,6 +77,33 @@ fn schema(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_records_ts ON records(ts);
          CREATE INDEX IF NOT EXISTS idx_records_subject ON records(subject_id);
          CREATE INDEX IF NOT EXISTS idx_records_module_level ON records(module, level);
+         CREATE TABLE IF NOT EXISTS otel_spans(
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           ts TEXT NOT NULL,
+           container TEXT NOT NULL,
+           trace_id TEXT,
+           span_id TEXT,
+           name TEXT NOT NULL,
+           duration_us INTEGER,
+           ok INTEGER,
+           error TEXT,
+           cell TEXT,
+           attrs_json TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_otel_spans_trace ON otel_spans(trace_id);
+         CREATE INDEX IF NOT EXISTS idx_otel_spans_ts ON otel_spans(ts);
+         CREATE TABLE IF NOT EXISTS otel_logs(
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           ts TEXT NOT NULL,
+           container TEXT NOT NULL,
+           trace_id TEXT,
+           span_id TEXT,
+           severity TEXT NOT NULL,
+           body TEXT NOT NULL,
+           attrs_json TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_otel_logs_trace ON otel_logs(trace_id);
+         CREATE INDEX IF NOT EXISTS idx_otel_logs_ts ON otel_logs(ts);
          CREATE TABLE IF NOT EXISTS push_outbox(
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            ts TEXT NOT NULL,
@@ -128,6 +155,10 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
     if batch.is_empty() {
         return;
     }
+    let ts = now_iso();
+    let container_for = |r: &Record| r.container.as_deref().unwrap_or(default_container);
+    let mut otel_span = None;
+    let mut otel_log = None;
     let mut stmt = match conn.prepare(
         "INSERT INTO records(ts,kind,subject_type,subject_id,container,module,level,code,message_full,context_json)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -139,14 +170,64 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
             return;
         }
     };
+    batch.retain(|r| {
+        match r.level {
+            "otel_span" => {
+                if otel_span.is_none() {
+                    otel_span = Some(conn.prepare(
+                        "INSERT INTO otel_spans(ts,container,trace_id,span_id,name,duration_us,ok,error,cell,attrs_json)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    ));
+                }
+                if let Ok(stmt) = otel_span.as_ref().unwrap() {
+                    let ctx: serde_json::Value = serde_json::from_str(&r.context).unwrap_or_default();
+                    let _ = stmt.execute(rusqlite::params![
+                        ts,
+                        container_for(r),
+                        ctx.get("trace_id").and_then(|v| v.as_str()),
+                        ctx.get("span_id").and_then(|v| v.as_str()),
+                        r.code,
+                        ctx.get("duration_us").and_then(|v| v.as_i64()),
+                        ctx.get("ok").and_then(|v| v.as_bool()).map(|b| b as i64),
+                        ctx.get("error").and_then(|v| v.as_str()),
+                        ctx.get("cell").and_then(|v| v.as_str()),
+                        r.context,
+                    ]);
+                }
+                false
+            }
+            "otel_log" => {
+                if otel_log.is_none() {
+                    otel_log = Some(conn.prepare(
+                        "INSERT INTO otel_logs(ts,container,trace_id,span_id,severity,body,attrs_json)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    ));
+                }
+                if let Ok(stmt) = otel_log.as_ref().unwrap() {
+                    let ctx: serde_json::Value = serde_json::from_str(&r.context).unwrap_or_default();
+                    let _ = stmt.execute(rusqlite::params![
+                        ts,
+                        container_for(r),
+                        ctx.get("trace_id").and_then(|v| v.as_str()),
+                        ctx.get("span_id").and_then(|v| v.as_str()),
+                        r.code,
+                        r.message,
+                        r.context,
+                    ]);
+                }
+                false
+            }
+            _ => true,
+        }
+    });
     for r in batch.drain(..) {
         let kind = if r.level == "error" { "error" } else { "log" };
         let _ = stmt.execute(rusqlite::params![
-            now_iso(),
+            ts,
             kind,
             r.subject_type,
             r.subject_id,
-            r.container.as_deref().unwrap_or(default_container),
+            container_for(&r),
             r.module,
             r.level,
             r.code,
@@ -372,6 +453,17 @@ pub fn info(subject_type: &'static str, subject_id: &str, module: &'static str, 
 /// failure is itself observable.
 pub fn dropped() -> u64 {
     DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A sender clone for in-process producers (the telemetry sink). Fails when
+/// records are disabled or the sink is the shipper mode.
+pub fn channel() -> Result<SyncSender<Record>> {
+    ensure_init();
+    SENDER
+        .get()
+        .and_then(|s| s.as_ref())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("records writer not initialized"))
 }
 
 /// Shared handle for the /records/append receiver: funnels shipped records

@@ -83,6 +83,10 @@ pub enum SinkChoice {
     Bucket,
     /// OTLP/http-protobuf to a collector — the ClickHouse-class path.
     Otlp { endpoint: String },
+    /// The records center database (`CELLD_RECORDS_DB` on this node): spans
+    /// and logs land in the `otel_spans` / `otel_logs` tables through the
+    /// records writer, so tracing joins errors and logs in one SQLite file.
+    Records,
 }
 
 #[derive(Debug)]
@@ -119,6 +123,7 @@ impl Config {
         let sink = match get("CELLD_OTEL")?.as_deref() {
             None | Some("0") => None,
             Some("1") => Some(SinkChoice::Bucket),
+            Some("records") => Some(SinkChoice::Records),
             Some(value) => {
                 let endpoint = reqwest::Url::parse(value)
                     .ok()
@@ -645,6 +650,16 @@ pub fn init(
                 retention: config.retention.label(),
             }
         }
+        SinkChoice::Records => {
+            tracing::info!(
+                sample_ratio = config.sample_ratio,
+                "telemetry on; records center database"
+            );
+            SinkRuntime::Records {
+                tx: crate::records::channel()
+                    .expect("the records sink needs CELLD_RECORDS_DB"),
+            }
+        }
         SinkChoice::Otlp { endpoint } => {
             tracing::info!(
                 endpoint = %endpoint,
@@ -685,6 +700,9 @@ pub fn init(
 }
 
 enum SinkRuntime {
+    Records {
+        tx: std::sync::mpsc::SyncSender<crate::records::Record>,
+    },
     Bucket {
         bucket: Bucket,
         retention: String,
@@ -712,6 +730,52 @@ impl SinkRuntime {
         let span_count = spans.len() as u64;
         let log_count = logs.len() as u64;
         match self {
+            SinkRuntime::Records { tx } => {
+                for span in spans {
+                    let context = serde_json::json!({
+                        "trace_id": span.ids.trace_id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                        "span_id": span.ids.span_id.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                        "kind": span.kind,
+                        "start_unix_us": span.start_unix_us,
+                        "ok": span.ok,
+                        "error": span.error,
+                        "cell": span.cell,
+                        "epoch": span.epoch,
+                        "isolate": span.isolate,
+                        "queue_wait_us": span.queue_wait_us,
+                        "url": span.url,
+                        "http_status": span.http_status,
+                    });
+                    let _ = tx.try_send(crate::records::Record {
+                        subject_type: "node",
+                        subject_id: node.to_string(),
+                        module: "telemetry",
+                        level: "otel_span",
+                        code: span.name.to_string(),
+                        message: span.error.clone().unwrap_or_default(),
+                        context: context.to_string(),
+                        container: None,
+                    });
+                }
+                for log in logs {
+                    let context = serde_json::json!({
+                        "trace_id": log.trace_id.map(|t| t.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+                        "span_id": log.span_id.map(|t| t.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+                        "time_unix_us": log.time_unix_us,
+                    });
+                    let _ = tx.try_send(crate::records::Record {
+                        subject_type: "node",
+                        subject_id: node.to_string(),
+                        module: "telemetry",
+                        level: "otel_log",
+                        code: format!("{:?}", log.severity),
+                        message: log.body,
+                        context: context.to_string(),
+                        container: None,
+                    });
+                }
+                0
+            }
             SinkRuntime::Bucket { bucket, retention } => {
                 let node_ = node.to_string();
                 let region_ = region.to_string();
