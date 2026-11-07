@@ -554,7 +554,7 @@ pub fn unacked_alerts(db_path: &str) -> Result<Vec<Alert>> {
         }
         out.push(Alert { fingerprint: fp, container, module, code, count, latest, sample });
     }
-    out.sort_by(|a, b| b.count.cmp(&a.count));
+    out.sort_by_key(|a| std::cmp::Reverse(a.count));
     Ok(out)
 }
 
