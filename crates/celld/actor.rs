@@ -259,6 +259,17 @@ impl Ownership {
         // claim has already written a record at epoch one. Each later wake
         // then advances one epoch, and a wake without a takeover can reuse a
         // stale local eviction snapshot, which skips the used-epoch check.
+        crate::records::error(
+            "instance",
+            &format!("{cell:?}"),
+            "ownership",
+            "ownership_record_lost",
+            format!(
+                "celld ownership record lost: cells/{cell}/own.json is missing, but the bucket holds LTX under cells/{cell}/ltx/; refusing to claim {cell} as a new cell for {} s",
+                crate::ownership_store::LOST_RECORD_RECHECK_MS / 1_000
+            ),
+            format!("{{\"cell\":{cell:?}}}"),
+        );
         eprintln!(
             "celld ownership record lost: cells/{cell}/own.json is missing, but the bucket \
              holds LTX under cells/{cell}/ltx/; refusing to claim {cell} as a new cell for \

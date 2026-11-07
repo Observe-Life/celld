@@ -928,6 +928,14 @@ impl ContainerEngine {
                 // `monitor()` sees this error only if it was already
                 // waiting; say it here too, or a start that fails fast
                 // leaves no trace anywhere.
+                crate::records::error(
+                    "instance",
+                    cell.scope.as_str(),
+                    "containers",
+                    "container_start_failed",
+                    format!("the container did not start: {error:#}"),
+                    format!("{{\"cell\":{:?}}}", cell.scope),
+                );
                 tracing::warn!(
                     event = "container_start_failed",
                     cell = %cell.scope,

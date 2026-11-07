@@ -139,8 +139,10 @@ fn writer(db_path: String, container: String, rx: Receiver<Record>) {
         tracing::error!(target: "celld::records", error = %e, "records schema failed");
         return;
     }
+    // 保留期：records/otel 表只留 30 天。每小时清一次，写线程自己顺手做，
+    // 不另起任务——量小（按 ts 索引删），且与写入同连接免去锁竞争。
+    let mut last_sweep = std::time::Instant::now() - Duration::from_secs(3600);
     let mut batch: Vec<Record> = Vec::with_capacity(BATCH_MAX);
-    let last_flush = std::time::Instant::now();
     loop {
         let deadline = std::time::Instant::now() + FLUSH_INTERVAL;
         loop {
@@ -157,7 +159,15 @@ fn writer(db_path: String, container: String, rx: Receiver<Record>) {
             }
         }
         flush(&conn, &container, &mut batch);
-        let _ = last_flush;
+        if last_sweep.elapsed() >= Duration::from_secs(3600) {
+            let cutoff = iso_offset(-30 * 86_400);
+            for table in ["records", "otel_spans", "otel_logs"] {
+                if let Err(e) = conn.execute(&format!("DELETE FROM {table} WHERE ts < ?1"), rusqlite::params![cutoff]) {
+                    tracing::warn!(target: "celld::records", table, error = %e, "records retention sweep failed");
+                }
+            }
+            last_sweep = std::time::Instant::now();
+        }
     }
 }
 
