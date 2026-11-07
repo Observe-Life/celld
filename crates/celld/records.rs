@@ -104,6 +104,12 @@ fn schema(conn: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS idx_otel_logs_trace ON otel_logs(trace_id);
          CREATE INDEX IF NOT EXISTS idx_otel_logs_ts ON otel_logs(ts);
+         CREATE TABLE IF NOT EXISTS alert_ack(
+           fingerprint TEXT PRIMARY KEY,
+           acked_at TEXT NOT NULL,
+           note TEXT NOT NULL,
+           until TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS push_outbox(
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            ts TEXT NOT NULL,
@@ -174,6 +180,20 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
     };
     batch.retain(|r| {
         match r.level {
+            "ack_request" => {
+                if r.message.contains(ACK_PHRASE) {
+                    let now = now_iso();
+                    let until = iso_plus_secs(ACK_COOLDOWN_SECS);
+                    if let Ok(mut stmt) = conn.prepare(
+                        "INSERT OR REPLACE INTO alert_ack(fingerprint,acked_at,note,until) VALUES(?1,?2,?3,?4)",
+                    ) {
+                        for fp in r.code.split(',').filter(|f| !f.is_empty()) {
+                            let _ = stmt.execute(rusqlite::params![fp, now, r.message, until]);
+                        }
+                    }
+                }
+                false
+            }
             "otel_span" => {
                 if otel_span.is_none() {
                     otel_span = conn.prepare(
@@ -449,6 +469,252 @@ pub fn warn(subject_type: &'static str, subject_id: &str, module: &'static str, 
 
 pub fn info(subject_type: &'static str, subject_id: &str, module: &'static str, code: &str, message: String, context: String) {
     send(Record { subject_type, subject_id: subject_id.to_string(), module, level: "info", code: code.to_string(), message, context, container: None });
+}
+
+pub const ACK_PHRASE: &str = "我知道了，我会转告用户的";
+const ACK_COOLDOWN_SECS: u64 = 3 * 3600;
+
+fn fingerprint(container: &str, module: &str, code: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in format!("{container}|{module}|{code}").as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+fn iso_plus_secs(extra: u64) -> String {
+    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs() + extra;
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let dday = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{dday:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+pub struct Alert {
+    pub fingerprint: String,
+    pub container: String,
+    pub module: String,
+    pub code: String,
+    pub count: u64,
+    pub latest: String,
+    pub sample: String,
+}
+
+/// 未确认的 error 级报错（近 24 小时、按 容器+模块+错误码 聚合、排除冷却中的指纹）。
+pub fn unacked_alerts(db_path: &str) -> Result<Vec<Alert>> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let cutoff = iso_plus_secs(0);
+    let day_ago = iso_plus_secs(86_400);
+    let mut out = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT container, module, code, COUNT(*), MAX(ts), MAX(message_full)
+         FROM records
+         WHERE level='error' AND kind='error' AND ts >= ?1
+         GROUP BY container, module, code",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![day_ago], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, u64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    for r in rows {
+        let (container, module, code, count, latest, sample) = r?;
+        let fp = fingerprint(&container, &module, &code);
+        let covered: Option<String> = conn
+            .query_row(
+                "SELECT until FROM alert_ack WHERE fingerprint=?1",
+                rusqlite::params![fp],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(until) = covered {
+            if until.as_str() > cutoff.as_str() {
+                continue;
+            }
+        }
+        out.push(Alert { fingerprint: fp, container, module, code, count, latest, sample });
+    }
+    out.sort_by(|a, b| b.count.cmp(&a.count));
+    Ok(out)
+}
+
+/// 确认一批指纹（校验原句），全部进入 3 小时冷却；确认语落库存档。
+pub fn ack_all(db_path: &str, note: &str) -> Result<usize> {
+    if !note.contains(ACK_PHRASE) {
+        anyhow::bail!("确认语必须包含原句：{ACK_PHRASE}");
+    }
+    let alerts = unacked_alerts(db_path)?;
+    let conn = Connection::open(db_path)?;
+    let now = iso_plus_secs(0);
+    let until = iso_plus_secs(ACK_COOLDOWN_SECS);
+    let mut n = 0;
+    for a in &alerts {
+        conn.execute(
+            "INSERT OR REPLACE INTO alert_ack(fingerprint,acked_at,note,until) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![a.fingerprint, now, note, until],
+        )?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+fn banner_lines(db_path: &str) -> Option<Vec<String>> {
+    let alerts = unacked_alerts(db_path).ok()?;
+    if alerts.is_empty() {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "[记录中心·未确认报错 {} 条——进门必读，处理前不得忽略]",
+        alerts.len()
+    )];
+    for (i, a) in alerts.iter().enumerate().take(9) {
+        lines.push(format!(
+            "{}. [{}] {}/{} ×{} 最新 {} | {}",
+            i + 1,
+            a.container,
+            a.module,
+            a.code,
+            a.count,
+            &a.latest[..a.latest.len().min(19)],
+            a.sample.chars().take(60).collect::<String>()
+        ));
+    }
+    if alerts.len() > 9 {
+        lines.push(format!("… 其余 {} 条见完整查询", alerts.len() - 9));
+    }
+    lines.push(
+        "完整查看所有报错（必须看完，再在回答中统一汇报给用户，不得遗漏）：".into(),
+    );
+    lines.push(format!(
+        "  celld records status   （数据库：{db_path}）"
+    ));
+    lines.push("解除阻断（原句确认，三小时冷却）：".into());
+    lines.push("  celld records ack --note "我知道了，我会转告用户的"".into());
+    Some(lines)
+}
+
+/// 进门横幅：有未确认报错时打印到 stderr（半强制）。任何失败都静默。
+pub fn banner_if_needed() {
+    let db = std::env::var("CELLD_RECORDS_DB")
+        .or_else(|_| std::env::var("CELLD_ALERTS_DB"))
+        .unwrap_or_else(|_| "/var/lib/celld/records-center.db".into());
+    if std::env::var("CELLD_RECORDS_BANNER").as_deref() == Ok("0") {
+        return;
+    }
+    if !std::path::Path::new(&db).exists() {
+        return;
+    }
+    if let Ok(true) = std::env::var("CELLD_RECORDS_BANNER_TEST").map(|v| v == "inject") {
+        // 测试注入由 CLI 自己负责，这里不处理。
+    }
+    if let Some(lines) = banner_lines(&db) {
+        for line in lines {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// `celld records ...` 子命令。async 仅为与其它 cli::run 签名一致。
+pub async fn cli(arguments: Vec<String>) -> Result<()> {
+    ensure_init();
+    let db = std::env::var("CELLD_RECORDS_DB")
+        .or_else(|_| std::env::var("CELLD_ALERTS_DB"))
+        .unwrap_or_else(|_| "/var/lib/celld/records-center.db".into());
+    let sub = arguments.first().map(String::as_str).unwrap_or("alert");
+    match sub {
+        "alert" | "banner" => {
+            ensure_init();
+            if let Some(lines) = banner_lines(&db) {
+                for line in lines {
+                    println!("{line}");
+                }
+            } else {
+                println!("当前没有未确认的 error 级报错。");
+            }
+            Ok(())
+        }
+        "ack" => {
+            ensure_init();
+            let note = arguments
+                .iter()
+                .position(|a| a == "--note")
+                .and_then(|i| arguments.get(i + 1))
+                .cloned()
+                .unwrap_or_default();
+            if !note.contains(ACK_PHRASE) {
+                anyhow::bail!("请原句回复确认语：{ACK_PHRASE}（可在其后附加补充说明）");
+            }
+            // 主容器（可写）直接确认；分节点（只读挂载）经通道发回主库。
+            let writable = std::env::var("CELLD_RECORDS_DB").is_ok()
+                && !std::env::var("CELLD_RECORDS_DB").unwrap().is_empty()
+                && std::path::Path::new(&db).writable();
+            if writable {
+                let n = ack_all(&db, &note)?;
+                println!("已确认 {n} 条报错，进入 3 小时冷却。别忘了在回答里转告用户。");
+                Ok(())
+            } else {
+                let fps: Vec<String> =
+                    unacked_alerts(&db)?.iter().map(|a| a.fingerprint.clone()).collect();
+                send(Record {
+                    subject_type: "node",
+                    subject_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "peer".into()),
+                    module: "records",
+                    level: "ack_request",
+                    code: fps.join(","),
+                    message: note,
+                    context: "{}".to_string(),
+                    container: None,
+                });
+                println!("已转交主节点确认（{} 个指纹），进入 3 小时冷却。别忘了在回答里转告用户。", fps.len());
+                Ok(())
+            }
+        }
+        "status" => {
+            ensure_init();
+            let conn = Connection::open_with_flags(
+                &db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let mut stmt = conn.prepare(
+                "SELECT ts, container, module, code, level, message_full FROM records WHERE level='error' ORDER BY id DESC LIMIT 50",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(serde_json::json!({
+                    "ts": row.get::<_, String>(0)?,
+                    "container": row.get::<_, String>(1)?,
+                    "module": row.get::<_, String>(2)?,
+                    "code": row.get::<_, String>(3)?,
+                    "level": row.get::<_, String>(4)?,
+                    "message": row.get::<_, String>(5)?,
+                }))
+            })?;
+            for row in rows {
+                println!("{}", row?);
+            }
+            Ok(())
+        }
+        other => anyhow::bail!("未知子命令 records {other:?}；可用：alert / ack / status"),
+    }
 }
 
 /// Dropped-record counter, surfaced by diagnose so a silent observability

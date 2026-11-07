@@ -3468,6 +3468,9 @@ const LOCAL_CACHE_PRUNE_PERIOD: std::time::Duration = std::time::Duration::from_
 
 fn main() -> anyhow::Result<()> {
     celld::records::ensure_init();
+    // 半强制告警：进门先看有没有未确认的 error 级报错（stderr，静音开关
+    // CELLD_RECORDS_BANNER=0）。任何失败都不能挡住正常工作。
+    celld::records::banner_if_needed();
     celld::env_vars::validate()?;
     // Parse the telemetry group once, before any command or runtime work.
     // Its specialized values share the strict scalar parsers in env_vars.
@@ -3552,6 +3555,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         Action::Cell(arguments) => return celld::cell_cli::run(arguments).await,
         Action::D1(arguments) => return celld::d1_cli::run(arguments).await,
         Action::Kv(arguments) => return celld::kv_cli::run(arguments).await,
+        Action::Records(arguments) => return celld::records::cli(arguments).await,
         Action::Queue(arguments) => return celld::queue_cli::run(arguments).await,
         Action::R2(arguments) => return celld::r2_cli::run(arguments).await,
         Action::Connect(arguments) => {
