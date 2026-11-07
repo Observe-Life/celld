@@ -11996,7 +11996,10 @@ fn disk_write_replacing(path: &std::path::Path, body: &str) -> std::io::Result<(
     Ok(())
 }
 
-fn disk_json(scope: &mut v8::PinScope, value: serde_json::Value) -> v8::Local<v8::Value> {
+fn disk_json<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: serde_json::Value,
+) -> v8::Local<'s, v8::Value> {
     let text = value.to_string();
     let v8_str = v8::String::new(scope, &text).unwrap();
     v8_str.into()
