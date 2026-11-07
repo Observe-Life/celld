@@ -166,7 +166,9 @@ pub fn ensure_init() {
     if INIT.get().is_some() {
         return;
     }
-    let node = std::env::var("CELLD_NODE").unwrap_or_else(|_| "celld".into());
+    let node = std::env::var("CELLD_RECORDS_LABEL")
+        .or_else(|_| std::env::var("CELLD_NODE"))
+        .unwrap_or_else(|_| "celld".into());
     if let Ok(db) = std::env::var("CELLD_RECORDS_DB") {
         if !db.is_empty() {
             let _ = init(&db, &node);

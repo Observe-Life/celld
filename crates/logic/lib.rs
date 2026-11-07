@@ -6138,6 +6138,9 @@ impl State {
             if now_mono_ms.saturating_sub(cell.last_used_mono_ms) < idle_ms {
                 continue;
             }
+            if !matches!(cell.phase, Phase::Resident { .. }) {
+                continue;
+            }
             let Some(blocker) = self.evict_blocker(id) else {
                 continue;
             };
