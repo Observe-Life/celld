@@ -6909,7 +6909,7 @@ class __QueueCell {
             );
           } else {
             console.warn(
-              `[queues] 消息转入死信队列：seq=${lease.seq} attempts=${expiry.attempt} dlq=${JSON.stringify(consumer.deadLetterQueue)}`,
+              `[queues] message moved to dead-letter queue: seq=${lease.seq} attempts=${expiry.attempt} dlq=${JSON.stringify(consumer.deadLetterQueue)}`,
             );
             sql.exec(
               `UPDATE ${__QUEUE_MESSAGES}
@@ -7750,7 +7750,7 @@ const __d1BindValue = (value) => {
     if (ArrayBuffer.isView(value)) return Array.from(Uint8Array.from(value));
   }
   console.warn(
-    `[d1] 绑定类型不支持：kind=${kind} value=${JSON.stringify(String(value).slice(0, 120))}`,
+    `[d1] bind type not supported: kind=${kind} value=${JSON.stringify(String(value).slice(0, 120))}`,
   );
   const error = new Error(
     `D1_TYPE_ERROR: Type '${kind}' not supported for value '${value}'`,
@@ -8571,7 +8571,7 @@ const __wfMakeStep = (driver) => {
           : 1;
         const nextAt = Date.now() + base * factor;
         console.warn(
-          `[workflows] step 重试：step=${JSON.stringify(name)} attempt=${attempt} 下次=${new Date(nextAt).toISOString()}`,
+          `[workflows] step retry: step=${JSON.stringify(name)} attempt=${attempt} next=${new Date(nextAt).toISOString()}`,
         );
         await storage.put(key, {
           kind: "do",
@@ -8772,7 +8772,7 @@ const __WorkflowCell = (() => {
     }
     if (meta.expiresMs > now) return false;
     console.info(
-      `[workflows] 保留期到期，清理实例元数据：instance=${JSON.stringify(meta.instanceId)} status=${meta.status}`,
+      `[workflows] retention expired, clearing instance metadata: instance=${JSON.stringify(meta.instanceId)} status=${meta.status}`,
     );
     clearInstance(transaction);
     return true;
@@ -9201,7 +9201,7 @@ const __WorkflowCell = (() => {
             return;
           }
           console.error(
-            "[workflows] 实例失败：run() 挂起 60 秒且无步骤在跑或阻塞（长异步工作必须包进 step.do）",
+            "[workflows] instance failed: run() pending 60s with no step running or blocked; wrap long async work in step.do",
           );
           driver.finish({
             kind: "error",
