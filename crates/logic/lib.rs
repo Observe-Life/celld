@@ -6130,6 +6130,11 @@ impl State {
         // leave is the exact shape of failure that used to be invisible (the
         // 2026-11-07 incident). Name the blocker; never more than three per
         // sample, so a wide backlog cannot flood the records center.
+        // The sweep itself is rate-gated: once per ~10 minutes of samples,
+        // so a chronic blocker cannot flood the records center.
+        if now_mono_ms % 600_000 >= 1_000 {
+            return;
+        }
         let mut reported = 0usize;
         for (id, cell) in self.cells.iter() {
             if reported >= 3 {
