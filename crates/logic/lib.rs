@@ -828,6 +828,9 @@ pub struct State {
     /// simulation could not reach. It is carried here so a sample
     /// sequence is replayable.
     shedding: bool,
+    /// The 10-minute bucket the idle-evict diagnostic last reported in, so a
+    /// chronic blocker records once per bucket instead of once per sample.
+    idle_report_bucket: u64,
     /// Whether the last load sample is below every configured low watermark.
     /// This is stricter than `!shedding` and reserves room for a fleet handoff.
     memory_headroom: bool,
@@ -896,6 +899,7 @@ impl State {
             shed_cut: None,
             latches: pressure::Latches::default(),
             shedding: false,
+            idle_report_bucket: 0,
             memory_headroom: false,
             shed_reason: None,
         }
@@ -6130,11 +6134,15 @@ impl State {
         // leave is the exact shape of failure that used to be invisible (the
         // 2026-11-07 incident). Name the blocker; never more than three per
         // sample, so a wide backlog cannot flood the records center.
-        // The sweep itself is rate-gated: once per ~10 minutes of samples,
-        // so a chronic blocker cannot flood the records center.
-        if now_mono_ms % 600_000 >= 1_000 {
+        // The sweep itself is rate-gated: once per ~10 minutes, so a
+        // chronic blocker records once per bucket instead of once per
+        // sample. The bucket number lives in the state, because a modulo
+        // of the monotonic clock drifts with the sample cadence.
+        let bucket = now_mono_ms / 600_000;
+        if bucket == self.idle_report_bucket {
             return;
         }
+        self.idle_report_bucket = bucket;
         let mut reported = 0usize;
         for (id, cell) in self.cells.iter() {
             if reported >= 3 {
