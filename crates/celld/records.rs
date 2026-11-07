@@ -12,7 +12,7 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CHANNEL_CAPACITY: usize = 4_096;

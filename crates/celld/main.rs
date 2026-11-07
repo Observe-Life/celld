@@ -1589,6 +1589,7 @@ const INTERNAL_LOG_APPEND_PATH: &str = "/peer/log/append";
 /// restore status 413; a generic stream error would turn the refusal into 500.
 const BODY_LIMIT_STREAM_ERROR: &str = "celld request body limit exceeded";
 
+#[derive(Debug)]
 enum BodyReadError {
     TooLarge,
     Invalid(String),
@@ -2393,7 +2394,7 @@ async fn handle_ingress(
                     "admission",
                     "admission_refused",
                     format!("Worker refused: {refused}"),
-                    "{}",
+                    "{}".to_string(),
                 );
                 response(
                     StatusCode::SERVICE_UNAVAILABLE,
