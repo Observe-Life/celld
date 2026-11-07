@@ -84,6 +84,7 @@ pub mod ownership_store;
 pub mod peer_auth;
 pub mod peer_probe;
 pub mod pool;
+pub mod records;
 pub mod protocol;
 pub(crate) mod queue_batching;
 pub mod queue_cli;

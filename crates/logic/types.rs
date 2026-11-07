@@ -1023,6 +1023,15 @@ pub enum EvictionAdmission {
 /// completion events with an obsolete `op` are ignored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
+    /// A records-center entry: an explicit error or a structured log that
+    /// must survive the node. The shell funnels these into the records
+    /// database; a logic decision never does I/O itself.
+    Record {
+        level: &'static str,
+        code: String,
+        message: String,
+        context: String,
+    },
     EvictionAdmission {
         request: RequestId,
         result: Result<EvictionAdmission, EvictError>,

@@ -3253,6 +3253,13 @@ impl Actor {
 
     fn execute(&mut self, effect: Effect, immediate: &mut VecDeque<Event>, out: &mut StepOutput) {
         match effect {
+            Effect::Record { level, code, message, context } => {
+                match level {
+                    "error" => crate::records::error("node", self.state.node(), "celld", &code, message, context),
+                    "warn" => crate::records::warn("node", self.state.node(), "celld", &code, message, context),
+                    _ => crate::records::info("node", self.state.node(), "celld", &code, message, context),
+                }
+            }
             Effect::ScheduleTimer { timer, at_mono_ms } => {
                 let (arm, _) = self.timer_slots.arm(timer, at_mono_ms, ());
                 out.timers.push(arm);
@@ -4207,11 +4214,14 @@ impl Actor {
                 // operator to guess between a lease it could not renew, a
                 // replicator that died, and a crash.
                 match reason {
-                    celld_logic::HaltReason::NodeLeaseExpired => tracing::warn!(
+                    celld_logic::HaltReason::NodeLeaseExpired => {
+                        crate::records::error("node", self.state.node(), "lease", "self_fence", "SELF-FENCE: node lease not renewed within TTL — halting".into(), format!("{{\"code\":{code:?}}}"));
+                        tracing::warn!(
                         event = "node_lease_watchdog_fence",
                         code,
                         "SELF-FENCE: node lease not renewed within TTL — halting"
-                    ),
+                    )
+                    }
                     celld_logic::HaltReason::NodeLeaseMissing => tracing::warn!(
                         event = "node_lease_record_missing_fence",
                         code,

@@ -6096,6 +6096,24 @@ impl State {
             .map(|(id, _)| id.clone())
     }
 
+    /// Why a cell cannot be shed right now, for the records center. `None`
+    /// means nothing blocks it: the generic candidate filters decide.
+    fn evict_blocker(&self, id: &CellId) -> Option<&'static str> {
+        let cell = self.cells.get(id)?;
+        if !matches!(cell.phase, Phase::Resident { .. }) {
+            return Some("not_resident");
+        }
+        if self.is_active(id) {
+            return Some("active");
+        }
+        if let Some(alarm) = &cell.alarm {
+            if !matches!(alarm, AlarmState::Armed { covered: true, .. }) {
+                return Some("alarm_uncovered");
+            }
+        }
+        None
+    }
+
     /// Release one cell that has gone cold, with nothing asking for the room.
     ///
     /// Shedding answers "this node is in trouble"; this answers the ordinary
@@ -6108,6 +6126,29 @@ impl State {
         let Some(idle_ms) = self.config.idle_evict_ms else {
             return;
         };
+        // Records: a cell that has been cold past the idle window yet cannot
+        // leave is the exact shape of failure that used to be invisible (the
+        // 2026-11-07 incident). Name the blocker; never more than three per
+        // sample, so a wide backlog cannot flood the records center.
+        let mut reported = 0usize;
+        for (id, cell) in self.cells.iter() {
+            if reported >= 3 {
+                break;
+            }
+            if now_mono_ms.saturating_sub(cell.last_used_mono_ms) < idle_ms {
+                continue;
+            }
+            let Some(blocker) = self.evict_blocker(id) else {
+                continue;
+            };
+            reported += 1;
+            effects.push(Effect::Record {
+                level: "warn",
+                code: "idle_evict_blocked".into(),
+                message: format!("cell {id} is idle past the evict window but cannot be evicted: {blocker}"),
+                context: format!("{{\"cell\":{id:?},\"blocker\":{blocker:?}}}"),
+            });
+        }
         // A latched node is already walking down on its own schedule, and
         // `shed_toward_floor` prefers the same cold cells. This is reached
         // from every eviction stop as well as from the sample, so the guard
@@ -6148,6 +6189,7 @@ impl State {
     /// until every configured low watermark clears, so the node walks down to
     /// its target instead of oscillating around its ceiling.
     fn load_sampled(&mut self, load: pressure::Load, now_mono_ms: u64, effects: &mut Vec<Effect>) {
+        let was_shedding = self.shedding;
         self.memory_headroom = self.config.pressure.has_headroom(load);
         // Both latches are folded, and the reason names the more serious of the
         // two. The latches are state of their own: derived from the reason
@@ -6156,6 +6198,28 @@ impl State {
         self.latches = latches;
         self.shed_reason = reason;
         self.shedding = reason.is_some();
+        if was_shedding != self.shedding {
+            let (code, level) = if self.shedding {
+                ("shed_latch_engaged", "error")
+            } else {
+                ("shed_latch_released", "info")
+            };
+            effects.push(Effect::Record {
+                level,
+                code: code.into(),
+                message: format!(
+                    "memory shedding latch {code}: in_use={} rss={}",
+                    load.memory_bytes(),
+                    load.hard_bytes()
+                ),
+                context: format!(
+                    "{{\"in_use\":{},\"rss\":{},\"reason\":{:?}}}",
+                    load.memory_bytes(),
+                    load.hard_bytes(),
+                    reason
+                ),
+            });
+        }
         if !self.shedding {
             // Relieved. Whatever was queued for capacity may proceed.
             self.shed_cut = None;
