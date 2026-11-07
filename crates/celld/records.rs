@@ -528,6 +528,133 @@ pub struct Alert {
     pub sample: String,
 }
 
+/// 记录中心库路径：主容器取 CELLD_RECORDS_DB，其余取只读挂载/缺省路径。
+fn alerts_db() -> String {
+    std::env::var("CELLD_RECORDS_DB")
+        .or_else(|_| std::env::var("CELLD_ALERTS_DB"))
+        .unwrap_or_else(|_| "/var/lib/celld/records-center.db".into())
+}
+
+/// Minimal HTTP/1.1 GET over a blocking socket; returns the body.
+fn http_get_json(url: &str) -> std::io::Result<String> {
+    use std::io::{Read, Write};
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "records endpoint must be http://")
+    })?;
+    let (hostport, path) = match rest.split_once('/') {
+        Some((h, pth)) => (h, format!("/{}", pth)),
+        None => (rest, "/".to_string()),
+    };
+    let mut stream = std::net::TcpStream::connect(hostport)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    stream.write_all(format!("GET {path} HTTP/1.1\r\nHost: {hostport}\r\nConnection: close\r\n\r\n").as_bytes())?;
+    let mut response = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+        if response.len() > 4 * 1024 * 1024 {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&response);
+    Ok(text.split("\r\n\r\n").skip(1).collect::<Vec<_>>().join("\r\n\r\n"))
+}
+
+/// 未确认告警的统一入口：分节点走 HTTP 查主节点；主节点（无 ENDPOINT）读本地库。
+pub fn alerts_current() -> Result<Vec<Alert>> {
+    if let Ok(endpoint) = std::env::var("CELLD_RECORDS_ENDPOINT") {
+        if !endpoint.is_empty() {
+            let base = endpoint.trim_end_matches("/append");
+            let body = http_get_json(&format!("{base}/records/alerts"))?;
+            let value: serde_json::Value = serde_json::from_str(&body)?;
+            let mut out = Vec::new();
+            for item in value
+                .get("alerts")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("alerts array missing"))?
+            {
+                out.push(Alert {
+                    fingerprint: item.get("fingerprint").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    container: item.get("container").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    module: item.get("module").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    code: item.get("code").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    count: item.get("count").and_then(|v| v.as_u64()).unwrap_or(0),
+                    latest: item.get("latest").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    sample: item.get("sample").and_then(|v| v.as_str()).unwrap_or("").into(),
+                });
+            }
+            return Ok(out);
+        }
+    }
+    unacked_alerts(&alerts_db())
+}
+
+/// 最近 error 级记录（JSON 行）——分节点走 HTTP；主节点读本地库。
+pub fn errors_current() -> Result<Vec<serde_json::Value>> {
+    if let Ok(endpoint) = std::env::var("CELLD_RECORDS_ENDPOINT") {
+        if !endpoint.is_empty() {
+            let base = endpoint.trim_end_matches("/append");
+            let body = http_get_json(&format!("{base}/records/errors"))?;
+            let value: serde_json::Value = serde_json::from_str(&body)?;
+            return Ok(value
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default());
+        }
+    }
+    let conn = Connection::open_with_flags(&alerts_db(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(
+        "SELECT json_object('ts',ts,'container',container,'module',module,'code',code,'level',level,'message',message_full)
+         FROM records WHERE level='error' ORDER BY id DESC LIMIT 50",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows
+        .filter_map(|r| r.ok())
+        .filter_map(|s| serde_json::from_str(&s).ok())
+        .collect())
+}
+
+/// 主节点路由用：未确认告警的 JSON（供 GET /records/alerts）。
+pub fn alerts_json() -> Result<serde_json::Value> {
+    let alerts = unacked_alerts(&alerts_db())?;
+    let items: Vec<serde_json::Value> = alerts
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "fingerprint": a.fingerprint,
+                "container": a.container,
+                "module": a.module,
+                "code": a.code,
+                "count": a.count,
+                "latest": a.latest,
+                "sample": a.sample,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "alerts": items }))
+}
+
+/// 主节点路由用：最近 error 记录的 JSON（供 GET /records/errors）。
+pub fn errors_json() -> Result<serde_json::Value> {
+    let conn = Connection::open_with_flags(&alerts_db(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(
+        "SELECT json_object('ts',ts,'container',container,'module',module,'code',code,'level',level,'message',message_full)
+         FROM records WHERE level='error' ORDER BY id DESC LIMIT 50",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let items: Vec<serde_json::Value> = rows
+        .filter_map(|r| r.ok())
+        .filter_map(|s| serde_json::from_str(&s).ok())
+        .collect();
+    Ok(serde_json::json!({ "errors": items }))
+}
+
 /// 未确认的 error 级报错（近 24 小时、按 容器+模块+错误码 聚合、排除冷却中的指纹）。
 pub fn unacked_alerts(db_path: &str) -> Result<Vec<Alert>> {
     let conn = Connection::open_with_flags(

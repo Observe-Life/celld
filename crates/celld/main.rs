@@ -2889,6 +2889,14 @@ async fn handle_internal(
     let evict_scope = path.strip_prefix("/evict/");
     let result = match path.as_str() {
         "/peer/probe" => internal_probe(request, app).await,
+        "/records/alerts" => match celld::records::alerts_json() {
+            Ok(value) => response(StatusCode::OK, value.to_string()),
+            Err(error) => response(StatusCode::INTERNAL_SERVER_ERROR, format!("{{\"error\":\"{error:?}\"}}")),
+        },
+        "/records/errors" => match celld::records::errors_json() {
+            Ok(value) => response(StatusCode::OK, value.to_string()),
+            Err(error) => response(StatusCode::INTERNAL_SERVER_ERROR, format!("{{\"error\":\"{error:?}\"}}")),
+        },
         "/records/append" if request.method() == hyper::Method::POST => {
             let body = request.into_body();
             match collect_limited_body(body, 4 * 1024 * 1024).await {
