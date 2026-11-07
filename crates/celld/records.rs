@@ -570,7 +570,7 @@ fn http_get_json(url: &str) -> std::io::Result<String> {
 pub fn alerts_current() -> Result<Vec<Alert>> {
     if let Ok(endpoint) = std::env::var("CELLD_RECORDS_ENDPOINT") {
         if !endpoint.is_empty() {
-            let base = endpoint.trim_end_matches("/append");
+            let base = endpoint.trim_end_matches("/records/append");
             let body = http_get_json(&format!("{base}/records/alerts"))?;
             let value: serde_json::Value = serde_json::from_str(&body)?;
             let mut out = Vec::new();
@@ -599,7 +599,7 @@ pub fn alerts_current() -> Result<Vec<Alert>> {
 pub fn errors_current() -> Result<Vec<serde_json::Value>> {
     if let Ok(endpoint) = std::env::var("CELLD_RECORDS_ENDPOINT") {
         if !endpoint.is_empty() {
-            let base = endpoint.trim_end_matches("/append");
+            let base = endpoint.trim_end_matches("/records/append");
             let body = http_get_json(&format!("{base}/records/errors"))?;
             let value: serde_json::Value = serde_json::from_str(&body)?;
             return Ok(value
