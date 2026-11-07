@@ -693,7 +693,7 @@ pub async fn cli(arguments: Vec<String>) -> Result<()> {
                     &label,
                     vec![Record {
                         subject_type: "node",
-                        subject_id: label,
+                        subject_id: label.clone(),
                         module: "records",
                         level: "ack_request",
                         code: fps.join(","),
