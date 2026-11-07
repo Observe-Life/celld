@@ -176,12 +176,12 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
         match r.level {
             "otel_span" => {
                 if otel_span.is_none() {
-                    otel_span = Some(conn.prepare(
+                    otel_span = conn.prepare(
                         "INSERT INTO otel_spans(ts,container,trace_id,span_id,name,duration_us,ok,error,cell,attrs_json)
                          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                    ));
+                    ).ok();
                 }
-                if let Ok(stmt) = otel_span.as_mut().unwrap() {
+                if let Some(stmt) = otel_span.as_mut() {
                     let ctx: serde_json::Value = serde_json::from_str(&r.context).unwrap_or_default();
                     let _ = stmt.execute(rusqlite::params![
                         ts,
@@ -200,12 +200,12 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
             }
             "otel_log" => {
                 if otel_log.is_none() {
-                    otel_log = Some(conn.prepare(
+                    otel_log = conn.prepare(
                         "INSERT INTO otel_logs(ts,container,trace_id,span_id,severity,body,attrs_json)
                          VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                    ));
+                    ).ok();
                 }
-                if let Ok(stmt) = otel_log.as_mut().unwrap() {
+                if let Some(stmt) = otel_log.as_mut() {
                     let ctx: serde_json::Value = serde_json::from_str(&r.context).unwrap_or_default();
                     let _ = stmt.execute(rusqlite::params![
                         ts,
