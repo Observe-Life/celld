@@ -108,6 +108,23 @@ export default {
       return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
     }
 
+    // disk 绑定自检：put → list → get → delete 往返（诊断设施，保留）
+    if (url.pathname === "/disk/selftest" && request.method === "POST") {
+      const file = `selftest-${Date.now()}.txt`;
+      const text = `disk selftest at ${new Date().toISOString()}`;
+      await env.MIRROR.put(file, text);
+      const back = await env.MIRROR.get(file);
+      const listing = await env.MIRROR.list();
+      await env.MIRROR.delete(file);
+      const after = await env.MIRROR.list();
+      return Response.json({
+        ok: back === text,
+        roundtrip: back === text,
+        listed: listing.some((entry) => entry.name === file),
+        removed: !after.some((entry) => entry.name === file),
+      });
+    }
+
     // 摄取：插件推送变更会话（含附件 base64）
     if (url.pathname === "/ingest" && request.method === "POST") {
       const raw = (await request.json()) as RawSession;

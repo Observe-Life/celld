@@ -14,6 +14,9 @@
   ],
   "kv_namespaces": [{ "binding": "STATE", "id": "sync-state" }],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "sync-files" }],
+  "disks": [
+    { "binding": "MIRROR", "path": "/data/session-mirror", "writable": true, "allow_dotfiles": false }
+  ],
   "vars": {
     "RAGF_URL": "http://rag-ferrite:4242",
     "RAGF_KEY": "@RAGF_KEY@",

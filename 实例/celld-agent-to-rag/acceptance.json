@@ -35,6 +35,12 @@
       "bucket": "sync-files",
       "backend": "s3://celld-rag"
     },
+    "disk": {
+      "binding": "MIRROR",
+      "path": "/data/session-mirror",
+      "writable": true,
+      "allow_dotfiles": false
+    },
     "services": [],
     "d1": false,
     "do": false,

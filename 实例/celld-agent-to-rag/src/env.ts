@@ -4,6 +4,13 @@
 export interface Env {
   STATE: KVNamespace;
   FILES: R2Bucket;
+  /** 会话 md 镜像目录（disk 绑定，workerd DiskDirectory 语义） */
+  MIRROR: {
+    get(path: string): Promise<string | Array<{ name: string; type: string }>>;
+    put(path: string, data: string): Promise<void>;
+    list(path?: string): Promise<Array<{ name: string; type: string }>>;
+    delete(path: string): Promise<void>;
+  };
   SYNC_FLOW: Workflow;
   RAGF_URL: string;
   RAGF_KEY: string;

@@ -650,7 +650,7 @@ pub(super) fn build_env(scope: &mut v8::PinScope, config: &WorkerConfig) -> Resu
             // One call per binding; the factory closes over the op and never
             // receives the host path — the registry holds it.
             lines.push_str(&format!(
-                "e[{:?}] = __celld.__makeDisk({:?}, {}, {});\\n",
+                "e[{:?}] = __celld.__makeDisk({:?}, {}, {});\n",
                 disk.name, disk.name, disk.writable, disk.allow_dotfiles
             ));
         }
