@@ -156,9 +156,11 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
         return;
     }
     let ts = now_iso();
-    let container_for = |r: &Record| r.container.as_deref().unwrap_or(default_container);
-    let mut otel_span = None;
-    let mut otel_log = None;
+    fn container_of<'a>(r: &'a Record, default_container: &'a str) -> &'a str {
+        r.container.as_deref().unwrap_or(default_container)
+    }
+    let mut otel_span: Option<rusqlite::Statement<'_>> = None;
+    let mut otel_log: Option<rusqlite::Statement<'_>> = None;
     let mut stmt = match conn.prepare(
         "INSERT INTO records(ts,kind,subject_type,subject_id,container,module,level,code,message_full,context_json)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
@@ -179,11 +181,11 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
                          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                     ));
                 }
-                if let Ok(stmt) = otel_span.as_ref().unwrap() {
+                if let Ok(stmt) = otel_span.as_mut().unwrap() {
                     let ctx: serde_json::Value = serde_json::from_str(&r.context).unwrap_or_default();
                     let _ = stmt.execute(rusqlite::params![
                         ts,
-                        container_for(r),
+                        container_of(r, default_container),
                         ctx.get("trace_id").and_then(|v| v.as_str()),
                         ctx.get("span_id").and_then(|v| v.as_str()),
                         r.code,
@@ -203,11 +205,11 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
                          VALUES(?1,?2,?3,?4,?5,?6,?7)",
                     ));
                 }
-                if let Ok(stmt) = otel_log.as_ref().unwrap() {
+                if let Ok(stmt) = otel_log.as_mut().unwrap() {
                     let ctx: serde_json::Value = serde_json::from_str(&r.context).unwrap_or_default();
                     let _ = stmt.execute(rusqlite::params![
                         ts,
-                        container_for(r),
+                        container_of(r, default_container),
                         ctx.get("trace_id").and_then(|v| v.as_str()),
                         ctx.get("span_id").and_then(|v| v.as_str()),
                         r.code,
@@ -227,7 +229,7 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
             kind,
             r.subject_type,
             r.subject_id,
-            container_for(&r),
+            container_of(&r, default_container),
             r.module,
             r.level,
             r.code,
