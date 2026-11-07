@@ -609,7 +609,7 @@ fn banner_lines(db_path: &str) -> Option<Vec<String>> {
         "  celld records status   （数据库：{db_path}）"
     ));
     lines.push("解除阻断（原句确认，三小时冷却）：".into());
-    lines.push("  celld records ack --note "我知道了，我会转告用户的"".into());
+    lines.push("  celld records ack --note \"我知道了，我会转告用户的\"".into());
     Some(lines)
 }
 
@@ -665,9 +665,7 @@ pub async fn cli(arguments: Vec<String>) -> Result<()> {
                 anyhow::bail!("请原句回复确认语：{ACK_PHRASE}（可在其后附加补充说明）");
             }
             // 主容器（可写）直接确认；分节点（只读挂载）经通道发回主库。
-            let writable = std::env::var("CELLD_RECORDS_DB").is_ok()
-                && !std::env::var("CELLD_RECORDS_DB").unwrap().is_empty()
-                && std::path::Path::new(&db).writable();
+            let writable = std::env::var("CELLD_RECORDS_ENDPOINT").is_err();
             if writable {
                 let n = ack_all(&db, &note)?;
                 println!("已确认 {n} 条报错，进入 3 小时冷却。别忘了在回答里转告用户。");
