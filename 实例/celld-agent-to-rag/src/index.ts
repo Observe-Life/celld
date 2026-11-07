@@ -35,10 +35,11 @@ import { deleteDocument } from "./lib/ragferrite";
 import { entriesFromSession, pushEntries, forgetTimeline } from "./lib/timeline";
 import type { RawSession } from "./lib/md";
 import { SessionSyncFlow } from "./workflows/session-sync";
+import { AstrBotPullFlow } from "./workflows/astrbot-sync";
 
 // celld 要求 Workflow 类必须由 worker 模块导出，否则节点启动即失败：
 // 「workflow class SessionSyncFlow is not exported by the Worker module」
-export { SessionSyncFlow };
+export { SessionSyncFlow, AstrBotPullFlow };
 
 function authorized(request: Request, env: Env): boolean {
   const token =
@@ -90,6 +91,17 @@ async function startSessions(env: Env, items: WorkItem[]) {
     restarted,
     deduped: skipped.length - restarted.length,
   };
+}
+
+/** 创建一轮拉取实例：单实例串行全部页，幂等实例号 = astrbot-pull（平台静默去重）。 */
+async function startPull(env: Env, maxPages: number): Promise<string[]> {
+  // 实例号带分钟刻度：同名固定号在 storage cell 里的残留会挡 createBatch（CapacityExhausted），
+  // 换刻度即换槽位。重复触发仍属幂等——上一实例跑完 retention 自清，此后 15 分钟内不重叠。
+  const slot = new Date().toISOString().slice(5, 16).replace(/[^0-9]/g, "");
+  const batch = [{ id: `astrbot-pull-${slot}`, params: { maxPages }, retention: { successRetention: 0, errorRetention: 3_600_000 } }];
+  // 不吞错：创建失败要能从响应里看到原因
+  const created = await env.SYNC_FLOW.createBatch(batch as never);
+  return (created as Array<{ id: string }>).map((i) => i.id);
 }
 
 export default {
@@ -250,6 +262,12 @@ export default {
       return Response.json({ ok: true, pending });
     }
 
+    // 手动触发一轮 AstrBot 拉取（诊断/补拉；cron 每小时的 0 分与 30 分自动跑）
+    if (url.pathname === "/astrbot/sync" && request.method === "POST") {
+      const started = await startPull(env, 6);
+      return Response.json({ ok: true, started });
+    }
+
     // 手动对账一轮：找出落后项并建实例（受 concurrency 限制）
     if (url.pathname === "/run" && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as { limit?: number };
@@ -323,6 +341,14 @@ export default {
 
   // 本实例是自己舰队的根，cron 直接生效（旧架构要靠中央 scheduler 中转）
   async scheduled(controller: unknown, env: Env): Promise<void> {
+    // 拉取式同步：createBatch 每页一个 AstrBotPullFlow 实例（幂等实例号，
+    // 平台对运行中同号静默跳过 → cron 重复触发天然去重）。搬运→入库→派活全在
+    // workflow step 里；本 handler 只创建实例。collectWork 的活这些实例自己会做。
+    try {
+      await startPull(env, 6);
+    } catch (error) {
+      console.warn("[agent-to-rag] astrbot pull dispatch failed:", String(error).slice(0, 200));
+    }
     const result = await collectWork(env);
     const r = await startSessions(env, result.items);
     console.log(

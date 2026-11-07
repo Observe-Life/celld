@@ -79,6 +79,9 @@ export class SessionSyncFlow extends WorkflowEntrypoint<Env, SessionParams> {
         const bytes = new TextEncoder().encode(md);
         const hash = await sha256Hex(bytes);
         await saveMd(this.env.FILES, head.md, md);
+        // 镜像双写：同步区 md 与语料同源同内容（disk 绑定，workerd DiskDirectory 语义）。
+        // 镜像失败随步骤一起重试；目录挂载正常时不会出现常态失败。
+        await this.env.MIRROR.put(head.md, md);
         return { hash, bytes: bytes.length };
       },
     );

@@ -3,7 +3,7 @@ python3 - <<PYEOF
 import json
 tpl = open("wrangler.template.jsonc").read()
 secrets = json.load(open("secrets.json"))
-for key in ("GEMINI_KEY", "RAGF_KEY", "SHAPI_KEY", "JBB_KEY", "INGEST_TOKEN"):
+for key in ("GEMINI_KEY", "RAGF_KEY", "SHAPI_KEY", "JBB_KEY", "INGEST_TOKEN", "ASTRBOT_API_KEY"):
     tpl = tpl.replace("@" + key + "@", secrets[key])
 tpl = tpl.replace("@SYNC_ALLOWLIST@", "$ALLOWLIST")
 open("wrangler.jsonc", "w").write(tpl)
@@ -42,7 +42,7 @@ python3 - <<PYEOF
 import json
 tpl = open("wrangler.template.jsonc").read()
 secrets = json.load(open("secrets.json"))
-for key in ("GEMINI_KEY", "RAGF_KEY", "SHAPI_KEY", "JBB_KEY", "INGEST_TOKEN"):
+for key in ("GEMINI_KEY", "RAGF_KEY", "SHAPI_KEY", "JBB_KEY", "INGEST_TOKEN", "ASTRBOT_API_KEY"):
     tpl = tpl.replace("@" + key + "@", secrets[key])
 tpl = tpl.replace("@SYNC_ALLOWLIST@", "$ALLOWLIST")
 open("wrangler.jsonc", "w").write(tpl)

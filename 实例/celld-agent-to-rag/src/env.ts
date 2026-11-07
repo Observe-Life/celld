@@ -22,4 +22,7 @@ export interface Env {
   SYNC_ALLOWLIST: string;
   /** 每轮最多创建几个 Workflow 实例；缺省或非正数按 2 处理 */
   SYNC_CONCURRENCY: string;
+  /** AstrBot OpenAPI 拉取通道（v4.18+ API Key，仅 data scope）与基址 */
+  ASTRBOT_API_KEY: string;
+  ASTRBOT_URL: string;
 }

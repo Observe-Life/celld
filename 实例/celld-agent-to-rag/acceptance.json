@@ -14,7 +14,7 @@
     "cron": {
       "root": true,
       "expressions": [
-        "37 * * * *"
+        "0,30 * * * *"
       ]
     },
     "workflows": true,

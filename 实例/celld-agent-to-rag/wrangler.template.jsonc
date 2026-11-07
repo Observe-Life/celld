@@ -4,10 +4,9 @@
   "compatibility_date": "2026-01-01",
   "triggers": {
     // 占位 cron：每年 1 月 1 日 00:00。目的只是让 Worker 导出 .cron 这个
-    // Durable Object class。留空数组或删除本段，桶里已有的 .cron cell 注册仍会
-    // 被平台尝试激活，于是找不到 DO class，就无限失败重试，而每次失败都泄漏一个
-    // epoch（celld issue #276）。要恢复真实对账节律时改这一行即可。
-    "crons": ["0 0 1 1 *"]
+    // Durable Object class。留空数组或删除本段都会让平台仍尝试激活 .cron cell，
+    // 却找不到 DO class，于是无限重试，而每次失败都写一个新 epoch（实测 1.86 个/秒）。
+    "crons": ["0,30 * * * *"]
   },
   "workflows": [
     { "binding": "SYNC_FLOW", "name": "session-sync", "class_name": "SessionSyncFlow" }
@@ -26,6 +25,8 @@
     "SKIP_GEMINI": "0",
     "INGEST_TOKEN": "@INGEST_TOKEN@",
     "SYNC_ALLOWLIST": "@SYNC_ALLOWLIST@",
-    "SYNC_CONCURRENCY": "2"
+    "SYNC_CONCURRENCY": "2",
+    "ASTRBOT_API_KEY": "@ASTRBOT_API_KEY@",
+    "ASTRBOT_URL": "http://astrbot:6185"
   }
 }
