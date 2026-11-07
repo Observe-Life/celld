@@ -4158,8 +4158,9 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
                     node_bucket(&settings, managed_storage.as_ref(), false)?
                 })
             }
-            // The collector path needs no bucket at all.
+            // The collector and records paths need no bucket at all.
             celld::telemetry::SinkChoice::Otlp { .. } => None,
+            celld::telemetry::SinkChoice::Records => None,
         };
         celld::telemetry::init(config, sink_bucket, node.clone(), settings.region.clone())?;
     }
