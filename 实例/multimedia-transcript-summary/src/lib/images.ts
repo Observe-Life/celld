@@ -15,17 +15,38 @@ function supported(url: string): boolean {
   return true;
 }
 
+export function decodeEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ");
+}
+
 export function extractImages(text: string): string[] {
   const images: string[] = [];
+  const push = (url: string) => {
+    const value = decodeEntities(url).trim();
+    if (value.startsWith("http")) images.push(value);
+  };
+  // ① Markdown 图（既有口径）
   for (const segment of (text || "").split("![")) {
     const open = segment.indexOf("(");
     const close = segment.indexOf(")");
-    if (open >= 0 && close > open) {
-      const url = segment.slice(open + 1, close).trim();
-      if (url.startsWith("http")) images.push(url);
-    }
+    if (open >= 0 && close > open) push(segment.slice(open + 1, close));
   }
-  return images;
+  // ② HTML img 残留（上游剥标签前的漏网）
+  for (const match of (text || "").matchAll(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi)) {
+    push(match[1]);
+  }
+  // ③ 裸微信图床 URL（微信正文的主形态）
+  for (const match of (text || "").matchAll(/https?:\/\/mmbiz\.qpic\.cn\/[^\s)"'<>\\]+/gi)) {
+    push(match[0]);
+  }
+  // 去重保序
+  return [...new Set(images)];
 }
 
 export function buildVisionRequest(text: string): {

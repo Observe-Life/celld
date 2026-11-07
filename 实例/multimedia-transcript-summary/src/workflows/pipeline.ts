@@ -16,7 +16,7 @@ import {
 } from "../lib/bilibili";
 import { fetchViaEgress, pipeViaEgress } from "../lib/egress";
 import { detectBilibiliKind, detectPlatform, extractUrl } from "../lib/platform";
-import { applyImageText, buildVisionRequest } from "../lib/images";
+import { applyImageText, buildVisionRequest, decodeEntities } from "../lib/images";
 import { extractXhsUrl, parseXhsNote, renderXhsText } from "../lib/xiaohongshu";
 import { extractSphUrl, parseSphDecrypt } from "../lib/shipinhao";
 import { parseBiliOpus } from "../lib/bilibili-opus";
@@ -90,6 +90,11 @@ function extractWechatText(raw: string): string {
     return html
       .replace(/<script[\s\S]*?<\/script>/gi, "")
       .replace(/<style[\s\S]*?<\/style>/gi, "")
+      // 微信懒加载：正文图基本在 data-src（src 常为占位），两属性都认，data-src 优先
+      .replace(/<img\b[^>]*>/gi, (tag: string) => {
+        const grab = tag.match(/\bdata-src\s*=\s*["']([^"']+)["']/i) || tag.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
+        return grab ? `\n![](${decodeEntities(grab[1])})\n` : "\n";
+      })
       .replace(/<[^>]+>/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
@@ -515,23 +520,19 @@ export class PipelineFlow extends WorkflowEntrypoint<Env, PipelineParams> {
         const req = buildVisionRequest(text);
         if (req.sent === 0) return { skipped: true, total: req.total, sent: 0, skippedCount: req.skipped };
         try {
-          const res = await fetchViaEgress(
-            this.env.EGRESS_URL,
-            "https://shapi.vip/v1/chat/completions",
-            {
-              method: "POST",
-              headers: {
-                authorization: `Bearer ${this.env.SHAPI_KEY}`,
-                "content-type": "application/json",
-              },
-              body: req.body,
+          // 金贝贝直连（不走 egress 代理）：与 agent-to-rag 转写同源同策略
+          const res = await fetch("https://cn.jbbt.cc/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${this.env.JBB_KEY}`,
+              "content-type": "application/json",
             },
-            180000,
-          );
+            body: req.body,
+          });
           if (res.status !== 200) {
             return { skipped: true, total: req.total, sent: req.sent, skippedCount: req.skipped, error: `vision ${res.status}` };
           }
-          const json = JSON.parse(res.text) as {
+          const json = JSON.parse(await res.text()) as {
             choices?: Array<{ message?: { content?: string } }>;
           };
           const answer = json.choices?.[0]?.message?.content ?? "";

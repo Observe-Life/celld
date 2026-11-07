@@ -5,7 +5,7 @@ export interface Env {
   GEMINI_KEY: string;
   SUPABASE_KEY: string;
   SERVERCHAN_URL: string;
-  SHAPI_KEY: string;
+  JBB_KEY: string;
   FLOW: Workflow;
   PIPELINE: Workflow;
 }

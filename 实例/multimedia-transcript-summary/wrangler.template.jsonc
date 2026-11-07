@@ -21,6 +21,6 @@
     "GEMINI_KEY": "@GEMINI_KEY@",
     "SUPABASE_KEY": "@SUPABASE_KEY@",
     "SERVERCHAN_URL": "@SERVERCHAN_URL@",
-    "SHAPI_KEY": "@SHAPI_KEY@"
+    "JBB_KEY": "@JBB_KEY@"
   }
 }

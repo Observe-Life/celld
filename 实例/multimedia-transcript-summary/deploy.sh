@@ -6,7 +6,7 @@ python3 - <<PYEOF
 import json
 tpl = open("wrangler.template.jsonc").read()
 secrets = json.load(open("secrets.json"))
-for key in ["TIKHUB_TOKEN", "RELAY_TOKEN", "GEMINI_KEY", "SUPABASE_KEY", "SERVERCHAN_URL", "SHAPI_KEY"]:
+for key in ["TIKHUB_TOKEN", "RELAY_TOKEN", "GEMINI_KEY", "SUPABASE_KEY", "SERVERCHAN_URL", "SHAPI_KEY", "JBB_KEY"]:
     tpl = tpl.replace("@" + key + "@", secrets[key])
 open("wrangler.jsonc", "w").write(tpl)
 PYEOF
