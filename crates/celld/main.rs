@@ -3470,7 +3470,9 @@ fn main() -> anyhow::Result<()> {
     celld::records::ensure_init();
     // 半强制告警：进门先看有没有未确认的 error 级报错（stderr，静音开关
     // CELLD_RECORDS_BANNER=0）。任何失败都不能挡住正常工作。
-    celld::records::banner_if_needed();
+    if std::env::args().nth(1).as_deref() != Some("records") {
+        celld::records::banner_if_needed();
+    }
     celld::env_vars::validate()?;
     // Parse the telemetry group once, before any command or runtime work.
     // Its specialized values share the strict scalar parsers in env_vars.

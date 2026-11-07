@@ -382,6 +382,18 @@ fn http_post_json(url: &str, body: &str) -> std::io::Result<u16> {
     Ok(status)
 }
 
+/// Synchronous one-shot shipment for one-shot CLI commands: the sender
+/// thread cannot help here, because the process exits before its timer
+/// fires (the 2026-11-07 ack that never arrived).
+pub fn ship_now(endpoint: &str, container: &str, records: Vec<Record>) -> Result<()> {
+    let mut batch = records;
+    ship(endpoint, container, &mut batch);
+    if !batch.is_empty() {
+        anyhow::bail!("shipment failed; {} record(s) kept", batch.len());
+    }
+    Ok(())
+}
+
 /// Receive shipped records from a peer node. Returns the accepted count.
 pub fn ingest_json(bytes: &[u8]) -> Result<usize> {
     let value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -671,18 +683,25 @@ pub async fn cli(arguments: Vec<String>) -> Result<()> {
                 println!("已确认 {n} 条报错，进入 3 小时冷却。别忘了在回答里转告用户。");
                 Ok(())
             } else {
+                let endpoint = std::env::var("CELLD_RECORDS_ENDPOINT")?;
                 let fps: Vec<String> =
                     unacked_alerts(&db)?.iter().map(|a| a.fingerprint.clone()).collect();
-                send(Record {
-                    subject_type: "node",
-                    subject_id: std::env::var("HOSTNAME").unwrap_or_else(|_| "peer".into()),
-                    module: "records",
-                    level: "ack_request",
-                    code: fps.join(","),
-                    message: note,
-                    context: "{}".to_string(),
-                    container: None,
-                });
+                let label = std::env::var("CELLD_RECORDS_LABEL")
+                    .unwrap_or_else(|_| "peer".into());
+                ship_now(
+                    &endpoint,
+                    &label,
+                    vec![Record {
+                        subject_type: "node",
+                        subject_id: label,
+                        module: "records",
+                        level: "ack_request",
+                        code: fps.join(","),
+                        message: note,
+                        context: "{}".to_string(),
+                        container: None,
+                    }],
+                )?;
                 println!("已转交主节点确认（{} 个指纹），进入 3 小时冷却。别忘了在回答里转告用户。", fps.len());
                 Ok(())
             }
