@@ -59,8 +59,12 @@ fn now_iso() -> String {
 }
 
 fn schema(conn: &Connection) -> Result<()> {
+    // Journal mode DELETE, not WAL: peer nodes read this database through a
+    // read-only bind mount of the single file, and a WAL reader without its
+    // -wal sidecar sees a stale snapshot (the 2026-11-07 cooldown that never
+    // took). DELETE keeps the database self-contained in one file.
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
+        "PRAGMA journal_mode=DELETE;
          CREATE TABLE IF NOT EXISTS records(
            id INTEGER PRIMARY KEY AUTOINCREMENT,
            ts TEXT NOT NULL,
