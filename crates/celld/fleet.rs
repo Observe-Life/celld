@@ -9,6 +9,7 @@
 //! Production bucket deployment adapters reused by the clean-sheet host.
 
 use crate::bucket::{Bucket, StorageProbeVerdict};
+use crate::engine_api::DiskBinding;
 use crate::deploy;
 use crate::js::{ModuleSource, WorkerConfigOptions};
 use crate::ownership_store::NodeLeaseWire;
@@ -843,6 +844,32 @@ async fn load_worker_at_pointer(
             ))
         })
         .collect();
+    // `disk`: a whitelisted node directory, with workerd DiskDirectory
+    // semantics. The path must be absolute — a relative path would silently
+    // track wherever the daemon was started from.
+    let disk_bindings = bindings(&manifest, "disk")
+        .filter_map(|binding| {
+            let path = binding.get("path")?.as_str()?.to_string();
+            if !std::path::Path::new(&path).is_absolute() {
+                return None;
+            }
+            Some((
+                binding.get("name")?.as_str()?.to_string(),
+                path,
+                binding.get("writable").and_then(|v| v.as_bool()).unwrap_or(false),
+                binding
+                    .get("allow_dotfiles")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            ))
+        })
+        .map(|(name, path, writable, allow_dotfiles)| DiskBinding {
+            name,
+            path,
+            writable,
+            allow_dotfiles,
+        })
+        .collect();
     // (env name, stable database identity). A Cloudflare database_id survives
     // Worker renames and lets several Workers share the resource. A celld-only
     // config without one falls back to the database name.
@@ -937,6 +964,7 @@ async fn load_worker_at_pointer(
             do_classes: manifest.do_classes,
             bindings: do_bindings,
             r2_bindings,
+            disk_bindings,
             d1_bindings,
             kv_bindings,
             queue_bindings,

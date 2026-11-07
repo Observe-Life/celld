@@ -4029,6 +4029,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
                 do_classes,
                 bindings,
                 r2_bindings,
+                disk_bindings: Vec::new(),
                 d1_bindings,
                 kv_bindings,
                 queue_bindings,

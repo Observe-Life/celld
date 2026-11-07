@@ -297,12 +297,26 @@ pub struct QueueBinding {
     pub delivery_delay: u32,
 }
 
+/// A `disk` binding: a whitelisted directory on the node, exposed to the
+/// Worker with workerd's DiskDirectory semantics (GET/PUT/DELETE/list over
+/// entry-name-validated paths). The manifest declares it; the operator who
+/// writes the manifest is the same party who owns the node, so the path is
+/// trusted at the config layer and re-validated at every operation.
+#[derive(Clone, Debug)]
+pub struct DiskBinding {
+    pub name: String,
+    pub path: String,
+    pub writable: bool,
+    pub allow_dotfiles: bool,
+}
+
 pub struct WorkerConfigOptions {
     pub src: String,
     pub script_name: String,
     pub do_classes: Vec<String>,
     pub bindings: Vec<(String, String)>,
     pub r2_bindings: Vec<(String, String)>,
+    pub disk_bindings: Vec<DiskBinding>,
     pub d1_bindings: Vec<(String, String)>,
     pub kv_bindings: Vec<(String, String)>,
     pub queue_bindings: Vec<QueueBinding>,

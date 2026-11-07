@@ -599,6 +599,7 @@ pub(super) fn build_env(scope: &mut v8::PinScope, config: &WorkerConfig) -> Resu
     let script_name = config.script_name.as_str();
     let bindings = config.bindings.as_slice();
     let r2_bindings = config.r2_bindings.as_slice();
+    let disk_bindings = config.disk_bindings.as_slice();
     let d1_bindings = config.d1_bindings.as_slice();
     let kv_bindings = config.kv_bindings.as_slice();
     let queue_bindings = config.queue_bindings.as_slice();
@@ -643,6 +644,14 @@ pub(super) fn build_env(scope: &mut v8::PinScope, config: &WorkerConfig) -> Resu
                 binding.queue,
                 celld_logic::queue::cell_name(&binding.queue),
                 binding.delivery_delay,
+            ));
+        }
+        for disk in disk_bindings {
+            // One call per binding; the factory closes over the op and never
+            // receives the host path — the registry holds it.
+            lines.push_str(&format!(
+                "e[{:?}] = __celld.__makeDisk({:?}, {}, {});\\n",
+                disk.name, disk.name, disk.writable, disk.allow_dotfiles
             ));
         }
         for (name, database) in d1_bindings {

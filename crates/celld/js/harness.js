@@ -3523,6 +3523,43 @@ __celld.__makeLoader = () => {
   };
 };
 
+const __makeDisk = __celld.__makeDisk = (name, writable, allowDotfiles) => {
+  // workerd DiskDirectory semantics over a whitelisted node directory.
+  // The host resolves the name to its directory; this side never learns it.
+  const run = (op, path, body) => {
+    const reply = JSON.parse(
+      __disk(name, op, path === undefined ? "" : String(path), body === undefined ? null : body),
+    );
+    if (!reply.ok) {
+      const err = new Error(`disk ${op} failed (${reply.status}): ${reply.error}`);
+      err.status = reply.status;
+      throw err;
+    }
+    return reply;
+  };
+  return {
+    async get(path) {
+      const reply = run("get", path);
+      return reply.kind === "dir" ? JSON.parse(JSON.stringify(reply.text)) : reply.text;
+    },
+    async put(path, data) {
+      run("put", path, typeof data === "string" ? data : String(data));
+    },
+    async list(path) {
+      return run("list", path === undefined ? "" : path).text;
+    },
+    async delete(path) {
+      run("delete", path);
+    },
+    get writable() {
+      return writable;
+    },
+    get allowDotfiles() {
+      return allowDotfiles;
+    },
+  };
+};
+
 const __makeServiceBinding = __celld.__makeServiceBinding =
   (script, entrypoint = null, propsSc = undefined) => {
   const target = {

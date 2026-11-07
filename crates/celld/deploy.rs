@@ -56,6 +56,7 @@ const SUPPORTED_KEYS: &[&str] = &[
     "queues",
     "workflows",
     "r2_buckets",
+    "disks",
     "worker_loaders",
     "containers",
     "no_bundle",
@@ -542,6 +543,10 @@ impl Built {
                     Some("r2_bucket") => {
                         let bucket = binding.get("bucket_name").and_then(Value::as_str)?;
                         Some((format!("env.{name} (R2)"), bucket.to_string()))
+                    }
+                    Some("disk") => {
+                        let path = binding.get("path").and_then(Value::as_str)?;
+                        Some((format!("env.{name} (Disk)"), path.to_string()))
                     }
                     Some("worker_loader") => Some((
                         format!("env.{name} (Worker Loader)"),
@@ -1831,6 +1836,54 @@ fn read_project(path: &Path, root: &Path, overrides: &VarOverrides) -> anyhow::R
             "type": "r2_bucket",
             "name": binding,
             "bucket_name": bucket_name,
+        }));
+    }
+    // `disk`: a directory on this node the Worker may read (and write, when
+    // `writable`). The manifest author owns the node, so the path is trusted
+    // at the config layer; the engine re-validates every path operation
+    // against the declared root. Absolute only — a relative path would track
+    // wherever the daemon happened to start.
+    let disks = match object.get("disks") {
+        None => &[][..],
+        Some(Value::Array(disks)) => disks.as_slice(),
+        Some(_) => bail!("config `disks` must be an array"),
+    };
+    let mut disk_binding_names = BTreeSet::new();
+    let mut disk_paths = BTreeSet::new();
+    for disk in disks {
+        let binding = disk
+            .get("binding")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("disk has no `binding`"))?;
+        if !valid_binding(binding) {
+            bail!("invalid disk binding name: {binding:?}");
+        }
+        if !disk_binding_names.insert(binding.to_string()) {
+            bail!("duplicate disk binding name: {binding:?}");
+        }
+        let path = disk
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("disk binding {binding} has no `path`"))?;
+        if !std::path::Path::new(path).is_absolute() {
+            bail!("disk binding {binding} path {path:?} must be absolute");
+        }
+        if !disk_paths.insert(path.to_string()) {
+            bail!("two disk bindings name the same directory: {path:?}");
+        }
+        for key in ["writable", "allow_dotfiles"] {
+            if let Some(value) = disk.get(key) {
+                if !value.is_boolean() {
+                    bail!("disk binding {binding} `{key}` must be a boolean");
+                }
+            }
+        }
+        bindings.push(json!({
+            "type": "disk",
+            "name": binding,
+            "path": path,
+            "writable": disk.get("writable").and_then(Value::as_bool).unwrap_or(false),
+            "allow_dotfiles": disk.get("allow_dotfiles").and_then(Value::as_bool).unwrap_or(false),
         }));
     }
     // `worker_loaders` is how a Dynamic Workers project asks for a Worker

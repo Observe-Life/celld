@@ -28,6 +28,7 @@ pub(crate) mod input_gate_lifecycle;
 use input_gate_lifecycle::{CrossEntryGateClaim, CrossEntryGateClaims};
 
 pub use crate::engine_api::answer_ticket;
+pub use crate::engine_api::DiskBinding;
 pub use crate::engine_api::d1_cell_scope;
 pub(crate) use crate::engine_api::decode_durable_object_id;
 pub(crate) use crate::engine_api::durable_object_id_for_name;
@@ -1889,6 +1890,11 @@ pub struct WorkerConfig {
     /// `r2_buckets`: (environment name, bucket name). The bucket name is
     /// the key space the binding owns inside the fleet bucket; see [[r2]].
     r2_bindings: Vec<(String, String)>,
+    /// `disk`: whitelisted node directories with workerd DiskDirectory
+    /// semantics. The registry also receives them at construction so the
+    /// host op can resolve a binding name to its directory without the
+    /// Worker ever seeing the path.
+    disk_bindings: Vec<DiskBinding>,
     /// `d1_databases`: (environment name, stable database identity). The
     /// identity addresses the cell that holds the database; see [[d1]].
     d1_bindings: Vec<(String, String)>,
@@ -2021,6 +2027,7 @@ impl WorkerConfig {
             do_classes,
             bindings,
             r2_bindings,
+            disk_bindings,
             d1_bindings,
             kv_bindings,
             queue_bindings,
@@ -2031,6 +2038,18 @@ impl WorkerConfig {
             modules,
             compat,
         } = options;
+        // Publish this Worker's disk bindings to the host registry before the
+        // isolate exists, so the first request resolves its name. Registration
+        // is idempotent and keyed by the deployment's binding name; a redeploy
+        // overwrites the previous directory for the same name.
+        for binding in &disk_bindings {
+            disk_registry_register(
+                &binding.name,
+                &binding.path,
+                binding.writable,
+                binding.allow_dotfiles,
+            );
+        }
         let main_imports = modules::scan_external_imports(&src);
         let module_imports = es_module_sources(&modules)
             .map(|(_name, source)| modules::scan_external_imports(source))
@@ -2051,6 +2070,7 @@ impl WorkerConfig {
             do_classes,
             bindings,
             r2_bindings,
+            disk_bindings: disk_bindings.clone(),
             d1_bindings,
             kv_bindings,
             queue_bindings,
@@ -6873,6 +6893,7 @@ ops! { OP_NAMES, install_op_functions,
         "__pending_event_end" => op_pending_event_end,
         "__vfs_mkdir" => op_vfs_mkdir,
         "__vfs_read_file" => op_vfs_read_file,
+        "__disk" => op_disk,
         "__vfs_stat" => op_vfs_stat,
         "__wait_until" => op_wait_until,
         "__wait_until_active" => op_wait_until_active,
@@ -7667,6 +7688,7 @@ fn op_loader_load(
             do_classes: Vec::new(),
             bindings: Vec::new(),
             r2_bindings: Vec::new(),
+            disk_bindings: Vec::new(),
             // A loaded worker reaches D1 only if its parent injects a stub;
             // ambient bindings are exactly what Code Mode withholds.
             d1_bindings: Vec::new(),
@@ -11890,6 +11912,217 @@ fn bundle_node(scope: &mut v8::PinScope, path: &str) -> Option<BundleStat> {
 /// Read a whole bundle file. Returns an `ArrayBuffer` of the module's bytes,
 /// or `null` when the path is not a bundle file, so the caller raises the
 /// `ENOENT` that names the syscall it was performing.
+/// One `disk` binding as the manifest declared it. The Worker only ever
+/// sees the binding name; the path, writability, and dotfile policy stay on
+/// this side of the boundary and are re-checked on every operation.
+#[derive(Clone)]
+struct DiskEntry {
+    root: std::path::PathBuf,
+    writable: bool,
+    allow_dotfiles: bool,
+}
+
+fn disk_registry() -> &'static std::sync::RwLock<HashMap<String, DiskEntry>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::RwLock<HashMap<String, DiskEntry>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+fn disk_registry_register(name: &str, path: &str, writable: bool, allow_dotfiles: bool) {
+    disk_registry()
+        .write()
+        .unwrap()
+        .insert(name.to_string(), DiskEntry {
+            root: std::path::PathBuf::from(path),
+            writable,
+            allow_dotfiles,
+        });
+}
+
+/// Whether `segment` names one entry of a directory: a single normal path
+/// component, so no separator, no `.`, `..`, drive, or NUL. Ported verbatim
+/// in spirit from workerd's `services/disk.rs`.
+fn disk_is_entry_name(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('/')
+        && !segment.contains('\\')
+        && !segment.contains('\0')
+        && !segment.contains(':')
+}
+
+/// The path a request names, as segments below the directory root. `None`
+/// when any segment is not an entry name — the operation must not run.
+fn disk_path_segments(path: &str) -> Option<Vec<String>> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            if disk_is_entry_name(segment) {
+                Some(segment.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// A PUT lands in a sibling temporary file first and renames into place, so
+/// a reader never observes a half-written file and a crash leaves no partial
+/// content behind. The temporary file is removed when dropped unless the
+/// rename already consumed it.
+struct DiskTemporary(std::path::PathBuf);
+
+impl Drop for DiskTemporary {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn disk_write_replacing(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "upload".to_string());
+    let temp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        file_name,
+        std::process::id()
+    ));
+    let mut guard = DiskTemporary(temp.clone());
+    std::fs::write(&temp, body.as_bytes())?;
+    std::fs::rename(&temp, path)?;
+    guard.0 = std::path::PathBuf::new();
+    Ok(())
+}
+
+fn disk_json(scope: &mut v8::PinScope, value: serde_json::Value) -> v8::Local<v8::Value> {
+    let text = value.to_string();
+    let v8_str = v8::String::new(scope, &text).unwrap();
+    v8_str.into()
+}
+
+fn op_disk(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue<v8::Value>,
+) {
+    let name = args.get(0).to_rust_string_lossy(scope);
+    let operation = args.get(1).to_rust_string_lossy(scope);
+    let path = args.get(2).to_rust_string_lossy(scope);
+    let entry = match disk_registry().read().unwrap().get(&name) {
+        Some(entry) => entry.clone(),
+        None => {
+            let out = serde_json::json!({"ok": false, "status": 404, "error": format!("unknown disk binding {name:?}")});
+            rv.set(disk_json(scope, out));
+            return;
+        }
+    };
+    let segments = match disk_path_segments(&path) {
+        Some(segments) => segments,
+        None => {
+            let out = serde_json::json!({"ok": false, "status": 404, "error": "path escapes the directory or names no entry"});
+            rv.set(disk_json(scope, out));
+            return;
+        }
+    };
+    if !entry.allow_dotfiles && segments.iter().any(|segment| segment.starts_with('.')) {
+        let out = serde_json::json!({"ok": false, "status": 404, "error": "dotfiles are hidden on this binding"});
+        rv.set(disk_json(scope, out));
+        return;
+    }
+    let mut target = entry.root.clone();
+    for segment in &segments {
+        target.push(segment);
+    }
+    let fail = |scope: &mut v8::PinScope, status: u16, error: String, rv: &mut v8::ReturnValue<v8::Value>| {
+        let out = serde_json::json!({"ok": false, "status": status, "error": error});
+        rv.set(disk_json(scope, out));
+    };
+    match operation.as_str() {
+        "get" | "list" => {
+            let metadata = match std::fs::metadata(&target) {
+                Ok(metadata) => metadata,
+                Err(_) => return fail(scope, 404, "not found".to_string(), &mut rv),
+            };
+            if metadata.is_file() {
+                match std::fs::read_to_string(&target) {
+                    Ok(text) => {
+                        let out = serde_json::json!({"ok": true, "kind": "file", "text": text});
+                        rv.set(disk_json(scope, out));
+                    }
+                    Err(_) => fail(scope, 406, "not valid UTF-8 text; this binding serves text only".to_string(), &mut rv),
+                }
+            } else if metadata.is_dir() {
+                let mut entries: Vec<serde_json::Value> = Vec::new();
+                let read = match std::fs::read_dir(&target) {
+                    Ok(read) => read,
+                    Err(_) => return fail(scope, 500, "cannot read directory".to_string(), &mut rv),
+                };
+                for item in read.flatten() {
+                    let file_name = item.file_name().to_string_lossy().to_string();
+                    if !entry.allow_dotfiles && file_name.starts_with('.') {
+                        continue;
+                    }
+                    let kind = match item.file_type() {
+                        Ok(file_type) if file_type.is_dir() => "directory",
+                        Ok(file_type) if file_type.is_file() => "file",
+                        _ => "other",
+                    };
+                    entries.push(serde_json::json!({"name": file_name, "type": kind}));
+                }
+                entries.sort_by(|a, b| {
+                    a.get("name").and_then(|v| v.as_str()).cmp(&b.get("name").and_then(|v| v.as_str()))
+                });
+                let out = serde_json::json!({"ok": true, "kind": "dir", "text": entries});
+                rv.set(disk_json(scope, out));
+            } else {
+                fail(scope, 406, "unsupported inode type".to_string(), &mut rv)
+            }
+        }
+        "put" => {
+            if !entry.writable {
+                return fail(scope, 405, "this disk binding is read-only".to_string(), &mut rv);
+            }
+            if segments.is_empty() {
+                return fail(scope, 403, "a PUT must name a file".to_string(), &mut rv);
+            }
+            let body = args.get(3).to_rust_string_lossy(scope);
+            if let Some(parent) = target.parent() {
+                if let Err(error) = std::fs::create_dir_all(parent) {
+                    return fail(scope, 500, format!("cannot create parent directories: {error}"), &mut rv);
+                }
+            }
+            match disk_write_replacing(&target, &body) {
+                Ok(()) => {
+                    let out = serde_json::json!({"ok": true, "kind": "file", "text": ""});
+                    rv.set(disk_json(scope, out));
+                }
+                Err(error) => fail(scope, 500, format!("write failed: {error}"), &mut rv),
+            }
+        }
+        "delete" => {
+            if !entry.writable {
+                return fail(scope, 405, "this disk binding is read-only".to_string(), &mut rv);
+            }
+            match std::fs::remove_file(&target) {
+                Ok(()) => {
+                    let out = serde_json::json!({"ok": true, "kind": "file", "text": ""});
+                    rv.set(disk_json(scope, out));
+                }
+                Err(_) => match std::fs::remove_dir(&target) {
+                    Ok(()) => {
+                        let out = serde_json::json!({"ok": true, "kind": "dir", "text": ""});
+                        rv.set(disk_json(scope, out));
+                    }
+                    Err(_) => fail(scope, 404, "not found or directory not empty".to_string(), &mut rv),
+                },
+            }
+        }
+        _ => fail(scope, 501, format!("unsupported disk operation {operation:?}"), &mut rv),
+    }
+}
+
 fn op_vfs_read_file(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
