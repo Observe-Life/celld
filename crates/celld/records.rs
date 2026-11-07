@@ -19,7 +19,7 @@ const CHANNEL_CAPACITY: usize = 4_096;
 const BATCH_MAX: usize = 256;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
-static SENDER: OnceLock<Option<Sender<Record>>> = OnceLock::new();
+static SENDER: OnceLock<Option<SyncSender<Record>>> = OnceLock::new();
 static DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug)]
@@ -180,7 +180,7 @@ pub fn ensure_init() {
 }
 
 fn sender_init(endpoint: &str, container: &str) -> Result<()> {
-    let (tx, rx): (Sender<Record>, Receiver<Record>) = mpsc::sync_channel(CHANNEL_CAPACITY);
+    let (tx, rx): (SyncSender<Record>, Receiver<Record>) = mpsc::sync_channel(CHANNEL_CAPACITY);
     let endpoint = endpoint.to_string();
     let container = container.to_string();
     std::thread::Builder::new()
@@ -325,7 +325,7 @@ pub fn init(db_path: &str, container: &str) -> Result<()> {
         let conn = Connection::open(db_path)?;
         schema(&conn)?;
     }
-    let (tx, rx): (Sender<Record>, Receiver<Record>) = mpsc::sync_channel(CHANNEL_CAPACITY);
+    let (tx, rx): (SyncSender<Record>, Receiver<Record>) = mpsc::sync_channel(CHANNEL_CAPACITY);
     let container = container.to_string();
     let db = db_path.to_string();
     std::thread::Builder::new()
@@ -370,7 +370,7 @@ pub fn dropped() -> u64 {
 /// Shared handle for the /records/append receiver: funnels shipped records
 /// from peer nodes into this node's writer.
 pub struct Ingest {
-    tx: Sender<Record>,
+    tx: SyncSender<Record>,
     _guard: Arc<()>,
 }
 
