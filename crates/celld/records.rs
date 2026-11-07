@@ -301,13 +301,13 @@ pub fn ingest_json(bytes: &[u8]) -> Result<usize> {
         };
         let level = get("level");
         let module = get("module");
-        let subject_type = Box::leak(
-            get("subject_type")
-                .replace("instance", "instance")
-                .into_boxed_str(),
-        );
+        let subject_type_raw = get("subject_type");
+        let subject_type: &'static str = match subject_type_raw.as_str() {
+            "instance" | "node" => Box::leak(subject_type_raw.into_boxed_str()),
+            _ => "instance",
+        };
         let r = Record {
-            subject_type: if subject_type.is_empty() { "instance" } else { subject_type },
+            subject_type,
             subject_id: get("subject_id"),
             module: Box::leak(module.into_boxed_str()),
             level: Box::leak(level.into_boxed_str()),
