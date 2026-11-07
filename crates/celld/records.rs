@@ -183,7 +183,7 @@ fn flush(conn: &Connection, default_container: &str, batch: &mut Vec<Record>) {
             "ack_request" => {
                 if r.message.contains(ACK_PHRASE) {
                     let now = now_iso();
-                    let until = iso_plus_secs(ACK_COOLDOWN_SECS);
+                    let until = iso_offset(ACK_COOLDOWN_SECS as i64);
                     if let Ok(mut stmt) = conn.prepare(
                         "INSERT OR REPLACE INTO alert_ack(fingerprint,acked_at,note,until) VALUES(?1,?2,?3,?4)",
                     ) {
@@ -483,9 +483,9 @@ fn fingerprint(container: &str, module: &str, code: &str) -> String {
     format!("{h:016x}")
 }
 
-fn iso_plus_secs(extra: u64) -> String {
+fn iso_offset(extra: i64) -> String {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = d.as_secs() + extra;
+    let secs = (d.as_secs() as i64 + extra).max(0) as u64;
     let days = secs / 86_400;
     let rem = secs % 86_400;
     let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
@@ -518,8 +518,8 @@ pub fn unacked_alerts(db_path: &str) -> Result<Vec<Alert>> {
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    let cutoff = iso_plus_secs(0);
-    let day_ago = iso_plus_secs(86_400);
+    let cutoff = iso_offset(0);
+    let day_ago = iso_offset(-86_400);
     let mut out = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT container, module, code, COUNT(*), MAX(ts), MAX(message_full)
@@ -565,8 +565,8 @@ pub fn ack_all(db_path: &str, note: &str) -> Result<usize> {
     }
     let alerts = unacked_alerts(db_path)?;
     let conn = Connection::open(db_path)?;
-    let now = iso_plus_secs(0);
-    let until = iso_plus_secs(ACK_COOLDOWN_SECS);
+    let now = iso_offset(0);
+    let until = iso_offset(ACK_COOLDOWN_SECS as i64);
     let mut n = 0;
     for a in &alerts {
         conn.execute(
