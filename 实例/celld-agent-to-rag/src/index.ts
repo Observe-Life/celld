@@ -56,7 +56,13 @@ function concurrency(env: Env): number {
 async function startSessions(env: Env, items: WorkItem[]) {
   const batch = items.slice(0, concurrency(env)).map((it) => {
     const wf = instanceId(it.uuid, it.updated_at);
-    return { id: wf, params: { uuid: it.uuid, wf } };
+    // 保留期：成功 0（完成即自清，闹钟秒级触发删元数据→cell 恢复可驱逐→共享堆可归还），
+    // 失败 1 小时（留排查窗口）。默认 30 天会把完成 cell 连同高峰堆钉死在共享 isolate 里。
+    return {
+      id: wf,
+      params: { uuid: it.uuid, wf },
+      retention: { successRetention: 0, errorRetention: 3_600_000 },
+    };
   });
   if (!batch.length) return { started: [] as string[], restarted: [] as string[], deduped: 0 };
   const created = await env.SYNC_FLOW.createBatch(batch);
