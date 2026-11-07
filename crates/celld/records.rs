@@ -631,21 +631,14 @@ fn banner_lines(db_path: &str) -> Option<Vec<String>> {
 
 /// 进门横幅：有未确认报错时打印到 stderr（半强制）。任何失败都静默。
 pub fn banner_if_needed() {
-    let db = std::env::var("CELLD_RECORDS_DB")
-        .or_else(|_| std::env::var("CELLD_ALERTS_DB"))
-        .unwrap_or_else(|_| "/var/lib/celld/records-center.db".into());
     if std::env::var("CELLD_RECORDS_BANNER").as_deref() == Ok("0") {
         return;
     }
-    if !std::path::Path::new(&db).exists() {
-        return;
-    }
-    if let Ok(true) = std::env::var("CELLD_RECORDS_BANNER_TEST").map(|v| v == "inject") {
-        // 测试注入由 CLI 自己负责，这里不处理。
-    }
-    if let Some(lines) = banner_lines(&db) {
-        for line in lines {
-            eprintln!("{line}");
+    if let Ok(alerts) = alerts_current() {
+        if !alerts.is_empty() {
+            for line in banner_text(&alerts) {
+                eprintln!("{line}");
+            }
         }
     }
 }
@@ -653,24 +646,21 @@ pub fn banner_if_needed() {
 /// `celld records ...` 子命令。async 仅为与其它 cli::run 签名一致。
 pub async fn cli(arguments: Vec<String>) -> Result<()> {
     ensure_init();
-    let db = std::env::var("CELLD_RECORDS_DB")
-        .or_else(|_| std::env::var("CELLD_ALERTS_DB"))
-        .unwrap_or_else(|_| "/var/lib/celld/records-center.db".into());
     let sub = arguments.first().map(String::as_str).unwrap_or("alert");
     match sub {
         "alert" | "banner" => {
-            ensure_init();
-            if let Some(lines) = banner_lines(&db) {
-                for line in lines {
-                    println!("{line}");
-                }
-            } else {
+            let alerts = alerts_current()?;
+            if alerts.is_empty() {
                 println!("当前没有未确认的 error 级报错。");
+                return Ok(());
+            }
+            for line in banner_text(&alerts) {
+                println!("{line}");
             }
             Ok(())
         }
         "ack" => {
-            ensure_init();
+            let alerts = alerts_current()?;
             let note = arguments
                 .iter()
                 .position(|a| a == "--note")
@@ -680,62 +670,76 @@ pub async fn cli(arguments: Vec<String>) -> Result<()> {
             if !note.contains(ACK_PHRASE) {
                 anyhow::bail!("请原句回复确认语：{ACK_PHRASE}（可在其后附加补充说明）");
             }
-            // 主容器（可写）直接确认；分节点（只读挂载）经通道发回主库。
-            let writable = std::env::var("CELLD_RECORDS_ENDPOINT").is_err();
-            if writable {
-                let n = ack_all(&db, &note)?;
-                println!("已确认 {n} 条报错，进入 3 小时冷却。别忘了在回答里转告用户。");
-                Ok(())
-            } else {
-                let endpoint = std::env::var("CELLD_RECORDS_ENDPOINT")?;
-                let fps: Vec<String> =
-                    unacked_alerts(&db)?.iter().map(|a| a.fingerprint.clone()).collect();
-                let label = std::env::var("CELLD_RECORDS_LABEL")
-                    .unwrap_or_else(|_| "peer".into());
-                ship_now(
-                    &endpoint,
-                    &label,
-                    vec![Record {
-                        subject_type: "node",
-                        subject_id: label.clone(),
-                        module: "records",
-                        level: "ack_request",
-                        code: fps.join(","),
-                        message: note,
-                        context: "{}".to_string(),
-                        container: None,
-                    }],
-                )?;
-                println!("已转交主节点确认（{} 个指纹），进入 3 小时冷却。别忘了在回答里转告用户。", fps.len());
-                Ok(())
+            let fps: Vec<String> = alerts.iter().map(|a| a.fingerprint.clone()).collect();
+            if let Ok(endpoint) = std::env::var("CELLD_RECORDS_ENDPOINT") {
+                if !endpoint.is_empty() {
+                    let label =
+                        std::env::var("CELLD_RECORDS_LABEL").unwrap_or_else(|_| "peer".into());
+                    ship_now(
+                        &endpoint,
+                        &label,
+                        vec![Record {
+                            subject_type: "node",
+                            subject_id: label.clone(),
+                            module: "records",
+                            level: "ack_request",
+                            code: fps.join(","),
+                            message: note,
+                            context: "{}".to_string(),
+                            container: None,
+                        }],
+                    )?;
+                    println!(
+                        "已转交主节点确认（{} 个指纹），进入 3 小时冷却。别忘了在回答里转告用户。",
+                        fps.len()
+                    );
+                    return Ok(());
+                }
             }
+            let db = std::env::var("CELLD_RECORDS_DB")
+                .unwrap_or_else(|_| "/var/lib/celld/records-center.db".into());
+            let n = ack_all(&db, &note)?;
+            println!("已确认 {n} 条报错，进入 3 小时冷却。别忘了在回答里转告用户。");
+            Ok(())
         }
         "status" => {
-            ensure_init();
-            let conn = Connection::open_with_flags(
-                &db,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            let mut stmt = conn.prepare(
-                "SELECT ts, container, module, code, level, message_full FROM records WHERE level='error' ORDER BY id DESC LIMIT 50",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(serde_json::json!({
-                    "ts": row.get::<_, String>(0)?,
-                    "container": row.get::<_, String>(1)?,
-                    "module": row.get::<_, String>(2)?,
-                    "code": row.get::<_, String>(3)?,
-                    "level": row.get::<_, String>(4)?,
-                    "message": row.get::<_, String>(5)?,
-                }))
-            })?;
-            for row in rows {
-                println!("{}", row?);
+            for row in errors_current()? {
+                println!("{row}");
             }
             Ok(())
         }
         other => anyhow::bail!("未知子命令 records {other:?}；可用：alert / ack / status"),
     }
+}
+
+/// 横幅文本（alert 与进门横幅共用）。
+fn banner_text(alerts: &[Alert]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "[记录中心·未确认报错 {} 条——进门必读，处理前不得忽略]",
+        alerts.len()
+    )];
+    for (i, a) in alerts.iter().enumerate().take(9) {
+        lines.push(format!(
+            "{}. [{}] {}/{} ×{} 最新 {} | {}",
+            i + 1,
+            a.container,
+            a.module,
+            a.code,
+            a.count,
+            a.latest.chars().take(19).collect::<String>(),
+            a.sample.chars().take(60).collect::<String>()
+        ));
+    }
+    if alerts.len() > 9 {
+        lines.push(format!("… 其余 {} 条见完整查询", alerts.len() - 9));
+    }
+    lines.push(
+        "完整查看所有报错（必须看完，再在回答中统一汇报给用户，不得遗漏）：".into(),
+    );
+    lines.push("  celld records status".into());
+    lines.push("解除阻断（原句确认，三小时冷却）：".into());
+    lines.push("  celld records ack --note \u{22}我知道了，我会转告用户的\u{22}".into());
+    lines
 }
 
 /// Dropped-record counter, surfaced by diagnose so a silent observability
