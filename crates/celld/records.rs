@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -296,16 +296,13 @@ pub fn ingest_json(bytes: &[u8]) -> Result<usize> {
                 .map(|v| v.as_str().unwrap_or_default().to_string())
                 .unwrap_or_default()
         };
+        let level = get("level");
+        let module = get("module");
         let r = Record {
             subject_type: "instance",
             subject_id: get("subject_id"),
-            module: Box::leak(get("module").into_boxed_str()),
-            level: Box::leak(match get("level").as_str() {
-                "error" => "error".to_string(),
-                "warn" => "warn".to_string(),
-                other => other,
-            }
-            .into_boxed_str()),
+            module: Box::leak(module.into_boxed_str()),
+            level: Box::leak(level.into_boxed_str()),
             code: get("code"),
             message: get("message"),
             context: get("context"),
