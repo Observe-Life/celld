@@ -41,7 +41,7 @@
     },
     {
       "name": "celld-typescript-check",
-      "base_url": "http://celld-wake-container:8081",
+      "base_url": "http://celld-intermediary:8081",
       "standby_container": "celld-typescript-check",
       "checks": [
         "health",
@@ -52,7 +52,7 @@
   "typecheck": {
     "enabled": true,
     "owner": "celld-typescript-check",
-    "entrypoint": "http://celld-wake-container:8081/check",
+    "entrypoint": "http://celld-intermediary:8081/check",
     "pass_criteria": "errors==0 且无 lib 缺失指纹码"
   },
   "typecheck_dirs": [
