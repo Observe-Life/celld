@@ -3465,7 +3465,7 @@ const DEFAULT_MAX_CONCURRENT_RELEASES: usize = 128;
 /// bucket writes over freshest peer counts (single-node setups).
 fn load_sample_period() -> std::time::Duration {
     std::time::Duration::from_millis(
-        crate::env_vars::positive_or("CELLD_SAMPLE_MS", 1_000u64).unwrap_or(1_000),
+        celld::env_vars::positive_or("CELLD_SAMPLE_MS", 1_000u64).unwrap_or(1_000),
     )
 }
 /// How often a node with balancing off samples the fleet leases for the
