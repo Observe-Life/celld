@@ -3461,7 +3461,13 @@ fn node_bucket(
 /// 40-second process deadline.
 const DEFAULT_MAX_CONCURRENT_RELEASES: usize = 128;
 /// The actor refreshes the counts a node lease publishes once per sample.
-const LOAD_SAMPLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+/// Defaults to 1s; `CELLD_SAMPLE_MS` widens it for fleets that prefer fewer
+/// bucket writes over freshest peer counts (single-node setups).
+fn load_sample_period() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        crate::env_vars::positive_or("CELLD_SAMPLE_MS", 1_000u64).unwrap_or(1_000),
+    )
+}
 /// How often a node with balancing off samples the fleet leases for the
 /// bucket-format gate: the balancing default, one shared fleet sample.
 const FORMAT_GATE_SAMPLE_MS: u64 = 5_000;
@@ -4431,7 +4437,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
     // which cell goes -- is in the core, so a sample sequence replays.
     {
         celld::asyncrt::spawn(async move {
-            let mut tick = celld::asyncrt::interval(LOAD_SAMPLE_PERIOD);
+            let mut tick = celld::asyncrt::interval(load_sample_period());
             tick.set_missed_tick_behavior(celld::asyncrt::MissedTickBehavior::Delay);
             // The seed sample above takes the CPU baseline. Sampling again on
             // the immediate tick divides CPU clock ticks by too little time and
@@ -4651,7 +4657,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
                 if app.tx.send(Message::Rebalance { cells }).is_err() {
                     return;
                 }
-                settled_after_ms = now_ms + LOAD_SAMPLE_PERIOD.as_millis() as u64;
+                settled_after_ms = now_ms + load_sample_period().as_millis() as u64;
             }
         });
     }
